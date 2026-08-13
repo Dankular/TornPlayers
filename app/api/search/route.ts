@@ -3,6 +3,7 @@ import { runSearch } from "@/lib/matching";
 import { TornApiError } from "@/lib/torn";
 import { FfScouterError } from "@/lib/ffscouter";
 import { TORN_HOF_CATEGORIES, type TornHofCategory } from "@/lib/types";
+import { KEY_SETUP_URL } from "@/lib/constants";
 
 // Give this route more room than the Next.js default before Vercel decides
 // it's hung — a full search fans out several dozen upstream calls.
@@ -51,7 +52,8 @@ export async function POST(req: NextRequest) {
       const status = err.code === 2 ? 401 : err.code === 16 ? 403 : 502;
       const message =
         err.code === 16
-          ? "This key doesn't have Hall of Fame access. Generate a key on torn.com/preferences.php#tab=api with at least the \"Public\" selections (or a Custom key that includes torn » hof) and try again."
+          ? "This key doesn't have Hall of Fame access. Use a Public key, or generate a Custom key that includes " +
+            `torn » hof (this link also covers FFScouter's requirements): ${KEY_SETUP_URL}`
           : `Torn API error: ${err.message}`;
       return NextResponse.json({ error: message, code: err.code }, { status });
     }

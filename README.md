@@ -28,16 +28,24 @@ to disk.
 
 ### Requirements on your Torn key
 
-- Needs the `torn » hof` selection (any Public key has this by default;
-  Custom/Limited keys must explicitly include it, otherwise you'll get a
-  clear "Hall of Fame access" error).
-- Needs to be **registered with FFScouter** — sign in at
-  [ffscouter.com](https://ffscouter.com) with your Torn account at least once
-  so it recognizes your key. Otherwise you'll get a clear error telling you
-  to do this.
-- Battlestats permission is optional — it's only used to show your own stats
-  for context, not for the matching itself (FFScouter already computes fair
-  fight from its own perspective on your key).
+FFScouter's estimates are what make the matching work, and FFScouter only
+recognizes keys registered through its own signup form — so in practice you
+need a **Custom key**, not a plain Public/Limited one:
+
+1. Generate a Custom key with the [pre-filled selections this app + FFScouter
+   need](https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=TornPlayers&user=hof,faction,basic,profile,cooldowns,refills,attacks,battlestats,personalstats&faction=members,rankedwarreport,warfare,wars,rankedwars&torn=hof,rankedwarreport,rankedwars)
+   (includes `torn » hof` for the Hall of Fame pull, plus everything
+   FFScouter currently asks for).
+2. Submit that key on [ffscouter.com](https://ffscouter.com) (accept its
+   terms, paste the key in the signup form) — allow a few minutes for it to
+   start returning estimates.
+3. Use that same key here. Missing `torn:hof` or an unregistered FFScouter
+   key both produce a specific, actionable error message instead of a
+   generic failure.
+
+Battlestats permission on the key is otherwise optional — it's only used to
+show your own stats for context, not for the matching itself (FFScouter
+already computes fair fight from its own perspective on your key).
 
 ## Development
 

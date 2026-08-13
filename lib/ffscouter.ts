@@ -1,3 +1,4 @@
+import { KEY_SETUP_URL } from "./constants";
 import type { FfScouterStats } from "./types";
 
 const FFSCOUTER_BASE = "https://ffscouter.com/api/v1/get-stats";
@@ -38,7 +39,9 @@ export async function getFairFightStats(key: string, targetIds: number[]): Promi
     if (!res.ok) {
       if (res.status === 401) {
         throw new FfScouterError(
-          'This Torn key isn\'t recognized by FFScouter. Sign in at ffscouter.com with this Torn account at least once (Torn login via "Sign in with Torn") so it can register your key, then try again.'
+          "This Torn key isn't registered with FFScouter yet. FFScouter requires a Custom key (not just Public/Limited) " +
+            `submitted through its signup form at https://ffscouter.com — generate one with the required selections here: ${KEY_SETUP_URL} ` +
+            "(this also covers this app's own Hall of Fame access), submit it on ffscouter.com, then try again."
         );
       }
       throw new FfScouterError(`FFScouter request failed with status ${res.status}`);

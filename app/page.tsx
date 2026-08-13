@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { MatchedPlayer, SearchResponse, TornHofCategory } from "@/lib/types";
 import { TORN_HOF_CATEGORIES } from "@/lib/types";
+import { KEY_SETUP_URL, FFSCOUTER_SIGNUP_URL } from "@/lib/constants";
 
 const CATEGORY_LABELS: Record<TornHofCategory, string> = {
   level: "Level",
@@ -104,8 +105,30 @@ export default function Home() {
           className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 font-mono text-sm outline-none focus:border-torn-accent"
         />
         <p className="mt-1 text-xs text-slate-500">
-          A Public or Limited key works (Hall of Fame + target lookups are public data). Your key is sent to our
-          server only for this request and is never stored or logged.
+          Needs a key with Hall of Fame access, registered with FFScouter (a Custom key, not just Public/Limited —
+          FFScouter estimates are what make the matching work). Your key is sent to our server only for this
+          request and is never stored or logged.
+        </p>
+        <p className="mt-1 text-xs text-slate-500">
+          Don&apos;t have one set up?{" "}
+          <a
+            href={KEY_SETUP_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="text-torn-accent2 underline hover:text-torn-accent2/80"
+          >
+            Generate a compatible key
+          </a>
+          , then submit it at{" "}
+          <a
+            href={FFSCOUTER_SIGNUP_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="text-torn-accent2 underline hover:text-torn-accent2/80"
+          >
+            ffscouter.com
+          </a>{" "}
+          before using it here.
         </p>
 
         <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2">
