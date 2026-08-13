@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { MatchedPlayer, SearchResponse, TornHofCategory } from "@/lib/types";
-import { TORN_HOF_CATEGORIES } from "@/lib/types";
+import { RECOMMENDED_EASY_TARGET_CATEGORIES, TORN_HOF_CATEGORIES } from "@/lib/types";
 import { KEY_SETUP_URL, FFSCOUTER_SIGNUP_URL } from "@/lib/constants";
 
 const CATEGORY_LABELS: Record<TornHofCategory, string> = {
@@ -22,7 +22,13 @@ const CATEGORY_LABELS: Record<TornHofCategory, string> = {
   traveltime: "Travel Time",
 };
 
-const DEFAULT_CATEGORIES: TornHofCategory[] = ["level", "rank", "attacks", "defends", "offences", "awards"];
+const DEFAULT_CATEGORIES = RECOMMENDED_EASY_TARGET_CATEGORIES;
+
+function levelColor(level: number) {
+  if (level >= 80) return "text-torn-accent";
+  if (level >= 50) return "text-yellow-400";
+  return "text-slate-300";
+}
 
 function timeAgo(ts: number) {
   if (!ts) return "unknown";
@@ -45,6 +51,7 @@ export default function Home() {
   const [categories, setCategories] = useState<TornHofCategory[]>(DEFAULT_CATEGORIES);
   const [minFairFight, setMinFairFight] = useState(0);
   const [maxFairFight, setMaxFairFight] = useState(1.5);
+  const [minLevel, setMinLevel] = useState(50);
   const [limit, setLimit] = useState(20);
   const [pagesPerCategory, setPagesPerCategory] = useState(1);
 
@@ -65,7 +72,7 @@ export default function Home() {
       const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, categories, minFairFight, maxFairFight, limit, pagesPerCategory }),
+        body: JSON.stringify({ apiKey, categories, minFairFight, maxFairFight, minLevel, limit, pagesPerCategory }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -88,12 +95,23 @@ export default function Home() {
         <p className="mt-2 max-w-2xl text-sm text-slate-400">
           Enter your Torn API key. We pull candidates from the public Torn Hall of Fame, score them with
           FFScouter&apos;s fair-fight estimates, and filter out anyone currently in hospital, jail, traveling, or
-          abroad — leaving a short list of easy, attackable targets.
+          abroad — leaving a short list of easy, attackable targets, ranked by <em>highest level first</em> so you
+          see the big names with weak stats before the small fry.
         </p>
       </header>
 
       <form onSubmit={handleSubmit} className="rounded-xl border border-torn-border bg-torn-panel p-5">
-        <label className="block text-sm font-medium text-slate-300">Torn API key</label>
+        <div className="flex items-center justify-between gap-3">
+          <label className="block text-sm font-medium text-slate-300">Torn API key</label>
+          <a
+            href={KEY_SETUP_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-md border border-torn-accent2/50 bg-torn-accent2/10 px-2.5 py-1 text-xs font-medium text-torn-accent2 transition hover:bg-torn-accent2/20"
+          >
+            Generate a compatible key ↗
+          </a>
+        </div>
         <input
           type="password"
           value={apiKey}
@@ -110,16 +128,8 @@ export default function Home() {
           request and is never stored or logged.
         </p>
         <p className="mt-1 text-xs text-slate-500">
-          Don&apos;t have one set up?{" "}
-          <a
-            href={KEY_SETUP_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="text-torn-accent2 underline hover:text-torn-accent2/80"
-          >
-            Generate a compatible key
-          </a>
-          , then submit it at{" "}
+          Click <span className="text-torn-accent2">Generate a compatible key</span> above to pre-fill the right
+          Torn selections, create the key, then submit it at{" "}
           <a
             href={FFSCOUTER_SIGNUP_URL}
             target="_blank"
@@ -134,6 +144,10 @@ export default function Home() {
         <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2">
           <div>
             <span className="block text-sm font-medium text-slate-300">Hall of Fame categories to scan</span>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Non-combat categories (working stats, net worth, busts, revives, racing) surface far more high-level,
+              weak-fighter accounts than attacks/defends/offences, which already select for people who fight well.
+            </p>
             <div className="mt-2 flex flex-wrap gap-2">
               {TORN_HOF_CATEGORIES.map((cat) => (
                 <button
@@ -153,6 +167,29 @@ export default function Home() {
           </div>
 
           <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-300">Min level</label>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={minLevel}
+                onChange={(e) => setMinLevel(parseInt(e.target.value, 10))}
+                className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
+              />
+              <p className="mt-1 text-[11px] text-slate-500">Results are ranked by level, highest first</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-300">Result limit</label>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={limit}
+                onChange={(e) => setLimit(parseInt(e.target.value, 10))}
+                className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
+              />
+            </div>
             <div>
               <label className="block text-sm font-medium text-slate-300">Min fair fight</label>
               <input
@@ -177,7 +214,7 @@ export default function Home() {
                 className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
               />
             </div>
-            <div>
+            <div className="col-span-2">
               <label className="block text-sm font-medium text-slate-300">Pages / category</label>
               <input
                 type="number"
@@ -187,18 +224,7 @@ export default function Home() {
                 onChange={(e) => setPagesPerCategory(parseInt(e.target.value, 10))}
                 className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
               />
-              <p className="mt-1 text-[11px] text-slate-500">100 candidates per page</p>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-300">Result limit</label>
-              <input
-                type="number"
-                min={1}
-                max={50}
-                value={limit}
-                onChange={(e) => setLimit(parseInt(e.target.value, 10))}
-                className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
-              />
+              <p className="mt-1 text-[11px] text-slate-500">100 candidates per page — more pages, deeper (slower) scan</p>
             </div>
           </div>
         </div>
@@ -228,8 +254,8 @@ export default function Home() {
 
           {result.matches.length === 0 ? (
             <p className="rounded-lg border border-torn-border bg-torn-panel p-6 text-sm text-slate-400">
-              No attackable matches found in range. Try widening the fair fight range, adding more Hall of Fame
-              categories, or scanning more pages per category.
+              No attackable matches found in range. Try lowering min level, widening the fair fight range, adding
+              more Hall of Fame categories, or scanning more pages per category.
             </p>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-torn-border">
@@ -237,7 +263,7 @@ export default function Home() {
                 <thead className="bg-black/30 text-left text-xs uppercase tracking-wide text-slate-400">
                   <tr>
                     <th className="px-3 py-2">Player</th>
-                    <th className="px-3 py-2">Level</th>
+                    <th className="px-3 py-2">Level ↓</th>
                     <th className="px-3 py-2">Fair fight</th>
                     <th className="px-3 py-2">Est. stats</th>
                     <th className="px-3 py-2">Status</th>
@@ -273,7 +299,7 @@ function MatchRow({ match }: { match: MatchedPlayer }) {
         </a>
         <span className="ml-1 text-xs text-slate-500">[{match.id}]</span>
       </td>
-      <td className="px-3 py-2">{match.level}</td>
+      <td className={`px-3 py-2 font-semibold ${levelColor(match.level)}`}>{match.level}</td>
       <td className={`px-3 py-2 font-semibold ${fairFightColor(match.fair_fight)}`}>
         {match.fair_fight?.toFixed(2) ?? "—"}
       </td>

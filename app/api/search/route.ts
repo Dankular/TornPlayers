@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { runSearch } from "@/lib/matching";
 import { TornApiError } from "@/lib/torn";
 import { FfScouterError } from "@/lib/ffscouter";
-import { TORN_HOF_CATEGORIES, type TornHofCategory } from "@/lib/types";
+import { RECOMMENDED_EASY_TARGET_CATEGORIES, TORN_HOF_CATEGORIES, type TornHofCategory } from "@/lib/types";
 import { KEY_SETUP_URL } from "@/lib/constants";
 
 // Give this route more room than the Next.js default before Vercel decides
@@ -15,6 +15,7 @@ interface SearchBody {
   pagesPerCategory?: number;
   minFairFight?: number;
   maxFairFight?: number;
+  minLevel?: number;
   limit?: number;
 }
 
@@ -37,10 +38,11 @@ export async function POST(req: NextRequest) {
 
   const options = {
     apiKey,
-    categories: categories.length > 0 ? categories : (["level", "rank", "attacks", "defends", "offences", "awards"] as TornHofCategory[]),
+    categories: categories.length > 0 ? categories : RECOMMENDED_EASY_TARGET_CATEGORIES,
     pagesPerCategory: clamp(body.pagesPerCategory ?? 1, 1, 3),
     minFairFight: typeof body.minFairFight === "number" ? body.minFairFight : 0,
     maxFairFight: typeof body.maxFairFight === "number" ? body.maxFairFight : 1.5,
+    minLevel: clamp(typeof body.minLevel === "number" ? body.minLevel : 50, 1, 100),
     limit: clamp(body.limit ?? 20, 1, 50),
   };
 

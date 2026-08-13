@@ -33,6 +33,24 @@ export const TORN_HOF_CATEGORIES: TornHofCategory[] = [
   "traveltime",
 ];
 
+// Categories where ranking highly has little to do with battle stats
+// (working stats, racing skill, net worth, busting, reviving are all trained
+// or earned independently of strength/speed/dexterity/defense). Seeding the
+// candidate pool from these surfaces far more "high level, low stats" easy
+// targets per scan than combat categories like attacks/defends/offences,
+// which already select for players who fight — and fight well.
+export const RECOMMENDED_EASY_TARGET_CATEGORIES: TornHofCategory[] = [
+  "workstats",
+  "networth",
+  "busts",
+  "revives",
+  "racingskill",
+  "racingpoints",
+  "racingwins",
+  "level",
+  "rank",
+];
+
 // The only state in which a player can actually be attacked.
 export type UserStatusState =
   | "Abroad"
@@ -119,5 +137,6 @@ export interface SearchOptions {
   pagesPerCategory: number; // each page = up to 100 entries
   minFairFight: number;
   maxFairFight: number;
+  minLevel: number;
   limit: number;
 }

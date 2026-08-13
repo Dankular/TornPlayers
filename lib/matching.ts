@@ -65,14 +65,19 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   const ffStats = await getFairFightStats(apiKey, candidateIds);
 
   // 3. Keep only candidates whose estimated fair fight falls in the requested
-  // "easy target" window, best (lowest) fair fight first.
+  // "easy target" window and who meet the level floor, then rank the ones
+  // worth spending a live status check on: within an already-easy fair
+  // fight, a higher level means more respect/rewards for the same safe win,
+  // so sort by level first (using the HOF snapshot level — good enough to
+  // prioritize the check queue) and fair fight second as a tiebreaker.
   const withinRange = candidateIds
-    .map((id) => ({ id, stats: ffStats.get(id) }))
-    .filter((c): c is { id: number; stats: NonNullable<typeof c.stats> } => {
+    .map((id) => ({ id, stats: ffStats.get(id), snapshotLevel: candidateEntries.get(id)?.entry.level ?? 0 }))
+    .filter((c): c is { id: number; stats: NonNullable<typeof c.stats>; snapshotLevel: number } => {
       if (!c.stats || c.stats.fair_fight == null) return false;
+      if (c.snapshotLevel < options.minLevel) return false;
       return c.stats.fair_fight >= options.minFairFight && c.stats.fair_fight <= options.maxFairFight;
     })
-    .sort((a, b) => (a.stats.fair_fight ?? 0) - (b.stats.fair_fight ?? 0));
+    .sort((a, b) => b.snapshotLevel - a.snapshotLevel || (a.stats.fair_fight ?? 0) - (b.stats.fair_fight ?? 0));
 
   // 4. Check live status (hospital/traveling/abroad/etc.) for the best
   // matches only, stopping once we have enough attackable results.
@@ -84,6 +89,7 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
     try {
       const profile = await getPlayerStatus(apiKey, id);
       if (profile.status.state !== ATTACKABLE_STATE) return;
+      if (profile.level < options.minLevel) return;
 
       const candidate = candidateEntries.get(id);
       matches.push({
@@ -108,7 +114,9 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
     }
   });
 
-  matches.sort((a, b) => (a.fair_fight ?? 0) - (b.fair_fight ?? 0));
+  // Highest level first (the "big name, weak fighter" target), lowest fair
+  // fight as the tiebreaker among equal levels.
+  matches.sort((a, b) => b.level - a.level || (a.fair_fight ?? 0) - (b.fair_fight ?? 0));
 
   return {
     self,
