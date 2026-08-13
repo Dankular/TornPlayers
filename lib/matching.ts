@@ -1,0 +1,119 @@
+import { mapWithConcurrency } from "./concurrency";
+import { getFairFightStats } from "./ffscouter";
+import { getHofPage, getOwnProfile, getPlayerStatus, TornApiError } from "./torn";
+import type { MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry } from "./types";
+
+const ATTACKABLE_STATE = "Okay";
+// How many fair-fight-filtered candidates we're willing to spend a live
+// status check on, per search. Keeps the request within a serverless
+// function's execution budget even if the filtered pool is large.
+const MAX_STATUS_CHECKS = 60;
+const STATUS_CHECK_CONCURRENCY = 8;
+const HOF_PAGE_CONCURRENCY = 4;
+
+export async function runSearch(options: SearchOptions): Promise<SearchResponse> {
+  const { apiKey } = options;
+
+  const self = await getOwnProfile(apiKey);
+
+  // 1. Build a candidate pool from the public Torn Hall of Fame.
+  const hofRequests: { category: TornHofCategory; page: number }[] = [];
+  for (const category of options.categories) {
+    for (let page = 0; page < options.pagesPerCategory; page++) {
+      hofRequests.push({ category, page });
+    }
+  }
+
+  const candidateEntries = new Map<number, { entry: TornHofEntry; categories: { category: TornHofCategory; value: number | string; rank: string }[] }>();
+
+  let hofErrors = 0;
+  let lastHofError: TornApiError | null = null;
+
+  const pages = await mapWithConcurrency(hofRequests, HOF_PAGE_CONCURRENCY, async ({ category, page }) => {
+    try {
+      return { category, entries: await getHofPage(apiKey, category, 100, page * 100) };
+    } catch (err) {
+      // A single category/page failing (e.g. transient rate limit) shouldn't
+      // sink the whole search — but keep track in case *every* request fails,
+      // which usually means the key itself lacks Hall of Fame access.
+      hofErrors++;
+      if (err instanceof TornApiError) lastHofError = err;
+      return { category, entries: [] as TornHofEntry[] };
+    }
+  });
+
+  if (hofErrors > 0 && hofErrors === hofRequests.length && lastHofError) {
+    throw lastHofError;
+  }
+
+  for (const { category, entries } of pages) {
+    for (const entry of entries) {
+      if (entry.id === self.id) continue;
+      const existing = candidateEntries.get(entry.id);
+      const hofRef = { category, value: entry.value, rank: entry.rank };
+      if (existing) {
+        existing.categories.push(hofRef);
+      } else {
+        candidateEntries.set(entry.id, { entry, categories: [hofRef] });
+      }
+    }
+  }
+
+  const candidateIds = Array.from(candidateEntries.keys());
+
+  // 2. Estimate battle stats / fair fight ratio for every candidate via FFScouter.
+  const ffStats = await getFairFightStats(apiKey, candidateIds);
+
+  // 3. Keep only candidates whose estimated fair fight falls in the requested
+  // "easy target" window, best (lowest) fair fight first.
+  const withinRange = candidateIds
+    .map((id) => ({ id, stats: ffStats.get(id) }))
+    .filter((c): c is { id: number; stats: NonNullable<typeof c.stats> } => {
+      if (!c.stats || c.stats.fair_fight == null) return false;
+      return c.stats.fair_fight >= options.minFairFight && c.stats.fair_fight <= options.maxFairFight;
+    })
+    .sort((a, b) => (a.stats.fair_fight ?? 0) - (b.stats.fair_fight ?? 0));
+
+  // 4. Check live status (hospital/traveling/abroad/etc.) for the best
+  // matches only, stopping once we have enough attackable results.
+  const matches: MatchedPlayer[] = [];
+  const toCheck = withinRange.slice(0, MAX_STATUS_CHECKS);
+
+  await mapWithConcurrency(toCheck, STATUS_CHECK_CONCURRENCY, async ({ id, stats }) => {
+    if (matches.length >= options.limit) return;
+    try {
+      const profile = await getPlayerStatus(apiKey, id);
+      if (profile.status.state !== ATTACKABLE_STATE) return;
+
+      const candidate = candidateEntries.get(id);
+      matches.push({
+        id: profile.id,
+        name: profile.name,
+        level: profile.level,
+        faction_id: profile.faction_id,
+        status: profile.status,
+        fair_fight: stats.fair_fight,
+        bs_estimate: stats.bs_estimate,
+        bs_estimate_human: stats.bs_estimate_human,
+        last_action: profile.last_action?.timestamp ?? 0,
+        hof_categories: candidate?.categories ?? [],
+      });
+    } catch (err) {
+      if (err instanceof TornApiError && err.code === 5) {
+        // Rate limited — skip this candidate rather than fail the search.
+        return;
+      }
+      // Deleted/invalid accounts, transient errors, etc. — skip.
+      return;
+    }
+  });
+
+  matches.sort((a, b) => (a.fair_fight ?? 0) - (b.fair_fight ?? 0));
+
+  return {
+    self,
+    candidates_scanned: candidateIds.length,
+    candidates_with_stats: withinRange.length,
+    matches: matches.slice(0, options.limit),
+  };
+}
