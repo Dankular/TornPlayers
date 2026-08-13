@@ -4,12 +4,20 @@ import { getHofPage, getOwnProfile, getPlayerStatus, TornApiError } from "./torn
 import type { MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry } from "./types";
 
 const ATTACKABLE_STATE = "Okay";
-// How many fair-fight-filtered candidates we're willing to spend a live
-// status check on, per search. Keeps the request within a serverless
-// function's execution budget even if the filtered pool is large.
-const MAX_STATUS_CHECKS = 60;
+// Total live status-check budget for a single search, spent across however
+// many fair-fight tiers it takes to fill the result list. Keeps the request
+// within a serverless function's execution/rate-limit budget.
+const MAX_STATUS_CHECKS = 80;
 const STATUS_CHECK_CONCURRENCY = 8;
 const HOF_PAGE_CONCURRENCY = 4;
+
+// There's no meaningful "right" fair fight cutoff to ask the user for up
+// front — the whole point is to find *something* attackable. So instead of a
+// fixed range, widen the fair-fight ceiling in steps until enough matches
+// are found (or the status-check budget runs out), trying the easiest tier
+// first and only falling back to a harder one when the easy tier comes up
+// empty.
+const FAIR_FIGHT_TIERS = [1, 1.5, 2, 3, 5, 8, 15, 50, Number.POSITIVE_INFINITY];
 
 export async function runSearch(options: SearchOptions): Promise<SearchResponse> {
   const { apiKey } = options;
@@ -64,55 +72,69 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   // 2. Estimate battle stats / fair fight ratio for every candidate via FFScouter.
   const ffStats = await getFairFightStats(apiKey, candidateIds);
 
-  // 3. Keep only candidates whose estimated fair fight falls in the requested
-  // "easy target" window and who meet the level floor, then rank the ones
-  // worth spending a live status check on: within an already-easy fair
-  // fight, a higher level means more respect/rewards for the same safe win,
-  // so sort by level first (using the HOF snapshot level — good enough to
-  // prioritize the check queue) and fair fight second as a tiebreaker.
-  const withinRange = candidateIds
+  // Everyone who clears the level floor and has a usable fair-fight estimate,
+  // ranked highest level first (fair fight as the tiebreaker). This ordering
+  // is fixed up front; the tier loop below only changes how far down it
+  // we're willing to look.
+  const eligible = candidateIds
     .map((id) => ({ id, stats: ffStats.get(id), snapshotLevel: candidateEntries.get(id)?.entry.level ?? 0 }))
     .filter((c): c is { id: number; stats: NonNullable<typeof c.stats>; snapshotLevel: number } => {
       if (!c.stats || c.stats.fair_fight == null) return false;
-      if (c.snapshotLevel < options.minLevel) return false;
-      return c.stats.fair_fight >= options.minFairFight && c.stats.fair_fight <= options.maxFairFight;
+      return c.snapshotLevel >= options.minLevel;
     })
     .sort((a, b) => b.snapshotLevel - a.snapshotLevel || (a.stats.fair_fight ?? 0) - (b.stats.fair_fight ?? 0));
 
-  // 4. Check live status (hospital/traveling/abroad/etc.) for the best
-  // matches only, stopping once we have enough attackable results.
+  // 3. Widen the fair-fight ceiling tier by tier, live-checking status
+  // (hospital/traveling/abroad/etc.) only for candidates not already
+  // checked in an earlier, easier tier, until we have enough attackable
+  // matches or run out of budget.
   const matches: MatchedPlayer[] = [];
-  const toCheck = withinRange.slice(0, MAX_STATUS_CHECKS);
+  const checked = new Set<number>();
+  let statusChecksSpent = 0;
+  let fairFightCeilingUsed: number | null = null;
 
-  await mapWithConcurrency(toCheck, STATUS_CHECK_CONCURRENCY, async ({ id, stats }) => {
-    if (matches.length >= options.limit) return;
-    try {
-      const profile = await getPlayerStatus(apiKey, id);
-      if (profile.status.state !== ATTACKABLE_STATE) return;
-      if (profile.level < options.minLevel) return;
+  for (const tier of FAIR_FIGHT_TIERS) {
+    if (matches.length >= options.limit || statusChecksSpent >= MAX_STATUS_CHECKS) break;
 
-      const candidate = candidateEntries.get(id);
-      matches.push({
-        id: profile.id,
-        name: profile.name,
-        level: profile.level,
-        faction_id: profile.faction_id,
-        status: profile.status,
-        fair_fight: stats.fair_fight,
-        bs_estimate: stats.bs_estimate,
-        bs_estimate_human: stats.bs_estimate_human,
-        last_action: profile.last_action?.timestamp ?? 0,
-        hof_categories: candidate?.categories ?? [],
-      });
-    } catch (err) {
-      if (err instanceof TornApiError && err.code === 5) {
-        // Rate limited — skip this candidate rather than fail the search.
+    const tierCandidates = eligible.filter((c) => !checked.has(c.id) && c.stats.fair_fight! <= tier);
+    if (tierCandidates.length === 0) continue;
+
+    const remainingBudget = MAX_STATUS_CHECKS - statusChecksSpent;
+    const batch = tierCandidates.slice(0, remainingBudget);
+    fairFightCeilingUsed = tier;
+
+    await mapWithConcurrency(batch, STATUS_CHECK_CONCURRENCY, async ({ id, stats }) => {
+      checked.add(id);
+      statusChecksSpent++;
+      if (matches.length >= options.limit) return;
+      try {
+        const profile = await getPlayerStatus(apiKey, id);
+        if (profile.status.state !== ATTACKABLE_STATE) return;
+        if (profile.level < options.minLevel) return;
+
+        const candidate = candidateEntries.get(id);
+        matches.push({
+          id: profile.id,
+          name: profile.name,
+          level: profile.level,
+          faction_id: profile.faction_id,
+          status: profile.status,
+          fair_fight: stats.fair_fight,
+          bs_estimate: stats.bs_estimate,
+          bs_estimate_human: stats.bs_estimate_human,
+          last_action: profile.last_action?.timestamp ?? 0,
+          hof_categories: candidate?.categories ?? [],
+        });
+      } catch (err) {
+        if (err instanceof TornApiError && err.code === 5) {
+          // Rate limited — skip this candidate rather than fail the search.
+          return;
+        }
+        // Deleted/invalid accounts, transient errors, etc. — skip.
         return;
       }
-      // Deleted/invalid accounts, transient errors, etc. — skip.
-      return;
-    }
-  });
+    });
+  }
 
   // Highest level first (the "big name, weak fighter" target), lowest fair
   // fight as the tiebreaker among equal levels.
@@ -121,7 +143,8 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   return {
     self,
     candidates_scanned: candidateIds.length,
-    candidates_with_stats: withinRange.length,
+    candidates_with_stats: eligible.length,
+    fair_fight_ceiling_used: fairFightCeilingUsed,
     matches: matches.slice(0, options.limit),
   };
 }

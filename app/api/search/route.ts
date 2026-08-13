@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { runSearch } from "@/lib/matching";
 import { TornApiError } from "@/lib/torn";
 import { FfScouterError } from "@/lib/ffscouter";
-import { RECOMMENDED_EASY_TARGET_CATEGORIES, TORN_HOF_CATEGORIES, type TornHofCategory } from "@/lib/types";
+import { TORN_HOF_CATEGORIES, type TornHofCategory } from "@/lib/types";
 import { KEY_SETUP_URL } from "@/lib/constants";
 
 // Give this route more room than the Next.js default before Vercel decides
@@ -11,10 +11,7 @@ export const maxDuration = 60;
 
 interface SearchBody {
   apiKey?: string;
-  categories?: string[];
   pagesPerCategory?: number;
-  minFairFight?: number;
-  maxFairFight?: number;
   minLevel?: number;
   limit?: number;
 }
@@ -32,16 +29,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "A valid 16-character Torn API key is required." }, { status: 400 });
   }
 
-  const categories: TornHofCategory[] = (body.categories ?? []).filter((c): c is TornHofCategory =>
-    (TORN_HOF_CATEGORIES as string[]).includes(c)
-  );
-
+  // Always scan every Hall of Fame category — there's no upside to leaving
+  // some out, since the fair-fight tiering already handles filtering out
+  // fights that turn out too hard.
   const options = {
     apiKey,
-    categories: categories.length > 0 ? categories : RECOMMENDED_EASY_TARGET_CATEGORIES,
+    categories: TORN_HOF_CATEGORIES as TornHofCategory[],
     pagesPerCategory: clamp(body.pagesPerCategory ?? 1, 1, 3),
-    minFairFight: typeof body.minFairFight === "number" ? body.minFairFight : 0,
-    maxFairFight: typeof body.maxFairFight === "number" ? body.maxFairFight : 1.5,
     minLevel: clamp(typeof body.minLevel === "number" ? body.minLevel : 50, 1, 100),
     limit: clamp(body.limit ?? 20, 1, 50),
   };

@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import type { MatchedPlayer, SearchResponse, TornHofCategory } from "@/lib/types";
-import { RECOMMENDED_EASY_TARGET_CATEGORIES, TORN_HOF_CATEGORIES } from "@/lib/types";
 import { KEY_SETUP_URL, FFSCOUTER_SIGNUP_URL } from "@/lib/constants";
 
 const CATEGORY_LABELS: Record<TornHofCategory, string> = {
@@ -21,8 +20,6 @@ const CATEGORY_LABELS: Record<TornHofCategory, string> = {
   racingskill: "Racing Skill",
   traveltime: "Travel Time",
 };
-
-const DEFAULT_CATEGORIES = RECOMMENDED_EASY_TARGET_CATEGORIES;
 
 function levelColor(level: number) {
   if (level >= 80) return "text-torn-accent";
@@ -48,9 +45,6 @@ function fairFightColor(ff: number | null) {
 
 export default function Home() {
   const [apiKey, setApiKey] = useState("");
-  const [categories, setCategories] = useState<TornHofCategory[]>(DEFAULT_CATEGORIES);
-  const [minFairFight, setMinFairFight] = useState(0);
-  const [maxFairFight, setMaxFairFight] = useState(1.5);
   const [minLevel, setMinLevel] = useState(50);
   const [limit, setLimit] = useState(20);
   const [pagesPerCategory, setPagesPerCategory] = useState(1);
@@ -58,10 +52,6 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null);
-
-  function toggleCategory(cat: TornHofCategory) {
-    setCategories((prev) => (prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat]));
-  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -72,7 +62,7 @@ export default function Home() {
       const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, categories, minFairFight, maxFairFight, minLevel, limit, pagesPerCategory }),
+        body: JSON.stringify({ apiKey, minLevel, limit, pagesPerCategory }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -93,10 +83,10 @@ export default function Home() {
           Torn<span className="text-torn-accent">Players</span>
         </h1>
         <p className="mt-2 max-w-2xl text-sm text-slate-400">
-          Enter your Torn API key. We pull candidates from the public Torn Hall of Fame, score them with
-          FFScouter&apos;s fair-fight estimates, and filter out anyone currently in hospital, jail, traveling, or
-          abroad — leaving a short list of easy, attackable targets, ranked by <em>highest level first</em> so you
-          see the big names with weak stats before the small fry.
+          Enter your Torn API key. We scan every category of the public Torn Hall of Fame, score every candidate
+          with FFScouter&apos;s fair-fight estimates, and automatically widen the search until we find attackable
+          targets — filtering out anyone in hospital, jail, traveling, or abroad — ranked by{" "}
+          <em>highest level first</em> so you see the big names with weak stats before the small fry.
         </p>
       </header>
 
@@ -141,97 +131,51 @@ export default function Home() {
           before using it here.
         </p>
 
-        <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2">
+        <div className="mt-5 grid grid-cols-3 gap-4">
           <div>
-            <span className="block text-sm font-medium text-slate-300">Hall of Fame categories to scan</span>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Non-combat categories (working stats, net worth, busts, revives, racing) surface far more high-level,
-              weak-fighter accounts than attacks/defends/offences, which already select for people who fight well.
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {TORN_HOF_CATEGORIES.map((cat) => (
-                <button
-                  type="button"
-                  key={cat}
-                  onClick={() => toggleCategory(cat)}
-                  className={`rounded-full border px-3 py-1 text-xs transition ${
-                    categories.includes(cat)
-                      ? "border-torn-accent bg-torn-accent/20 text-white"
-                      : "border-torn-border text-slate-400 hover:border-slate-500"
-                  }`}
-                >
-                  {CATEGORY_LABELS[cat]}
-                </button>
-              ))}
-            </div>
+            <label className="block text-sm font-medium text-slate-300">Min level</label>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={minLevel}
+              onChange={(e) => setMinLevel(parseInt(e.target.value, 10))}
+              className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
+            />
+            <p className="mt-1 text-[11px] text-slate-500">Results ranked by level, highest first</p>
           </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-300">Min level</label>
-              <input
-                type="number"
-                min={1}
-                max={100}
-                value={minLevel}
-                onChange={(e) => setMinLevel(parseInt(e.target.value, 10))}
-                className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
-              />
-              <p className="mt-1 text-[11px] text-slate-500">Results are ranked by level, highest first</p>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-300">Result limit</label>
-              <input
-                type="number"
-                min={1}
-                max={50}
-                value={limit}
-                onChange={(e) => setLimit(parseInt(e.target.value, 10))}
-                className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-300">Min fair fight</label>
-              <input
-                type="number"
-                step="0.1"
-                min={0}
-                max={5}
-                value={minFairFight}
-                onChange={(e) => setMinFairFight(parseFloat(e.target.value))}
-                className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-300">Max fair fight</label>
-              <input
-                type="number"
-                step="0.1"
-                min={0}
-                max={5}
-                value={maxFairFight}
-                onChange={(e) => setMaxFairFight(parseFloat(e.target.value))}
-                className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
-              />
-            </div>
-            <div className="col-span-2">
-              <label className="block text-sm font-medium text-slate-300">Pages / category</label>
-              <input
-                type="number"
-                min={1}
-                max={3}
-                value={pagesPerCategory}
-                onChange={(e) => setPagesPerCategory(parseInt(e.target.value, 10))}
-                className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
-              />
-              <p className="mt-1 text-[11px] text-slate-500">100 candidates per page — more pages, deeper (slower) scan</p>
-            </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-300">Result limit</label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={limit}
+              onChange={(e) => setLimit(parseInt(e.target.value, 10))}
+              className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-300">Pages / category</label>
+            <input
+              type="number"
+              min={1}
+              max={3}
+              value={pagesPerCategory}
+              onChange={(e) => setPagesPerCategory(parseInt(e.target.value, 10))}
+              className="mt-1 w-full rounded-md border border-torn-border bg-black/30 px-3 py-2 text-sm outline-none focus:border-torn-accent"
+            />
+            <p className="mt-1 text-[11px] text-slate-500">100 candidates/category/page</p>
           </div>
         </div>
+        <p className="mt-3 text-[11px] text-slate-500">
+          No fair-fight range to set — every Hall of Fame category is scanned, and the search automatically widens
+          how hard a fight it&apos;s willing to accept until it fills the result list (easiest fights first).
+        </p>
 
         <button
           type="submit"
-          disabled={loading || categories.length === 0}
+          disabled={loading}
           className="mt-6 w-full rounded-md bg-torn-accent py-2.5 font-semibold text-white transition hover:bg-torn-accent/90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:px-8"
         >
           {loading ? "Scanning…" : "Find easy targets"}
@@ -247,15 +191,19 @@ export default function Home() {
               {result.matches.length} attackable match{result.matches.length === 1 ? "" : "es"}
             </h2>
             <p className="text-xs text-slate-500">
-              Scanned {result.candidates_scanned} HOF candidates · {result.candidates_with_stats} within your fair
-              fight range · for {result.self.name} (lvl {result.self.level})
+              Scanned {result.candidates_scanned} HOF candidates · {result.candidates_with_stats} met your level
+              floor
+              {result.fair_fight_ceiling_used != null && (
+                <> · widened to fair fight ≤ {result.fair_fight_ceiling_used.toFixed(1)} to fill results</>
+              )}{" "}
+              · for {result.self.name} (lvl {result.self.level})
             </p>
           </div>
 
           {result.matches.length === 0 ? (
             <p className="rounded-lg border border-torn-border bg-torn-panel p-6 text-sm text-slate-400">
-              No attackable matches found in range. Try lowering min level, widening the fair fight range, adding
-              more Hall of Fame categories, or scanning more pages per category.
+              No attackable matches found even after widening the fair fight range as far as it goes. Try lowering
+              min level or scanning more pages per category to grow the candidate pool.
             </p>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-torn-border">
