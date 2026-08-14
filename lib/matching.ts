@@ -1,7 +1,9 @@
+import { after } from "next/server";
 import { mapWithConcurrency } from "./concurrency";
+import { ensureSchema, getSql, queryCandidatePool, upsertHofEntries, upsertStats } from "./db";
 import { getFairFightStats } from "./ffscouter";
 import { getHofPage, getOutgoingAttackHistory, getOwnProfile, getPlayerStatus, TornApiError } from "./torn";
-import type { MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry } from "./types";
+import type { FfScouterStats, MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry } from "./types";
 
 const ATTACKABLE_STATE = "Okay";
 // Total live status-check budget for a single search, spent across however
@@ -16,6 +18,12 @@ const HOF_PAGE_CONCURRENCY = 4;
 const ATTACK_HISTORY_LOOKBACK_DAYS = 180;
 const ATTACK_HISTORY_MAX_PAGES = 5;
 
+// How many players to pull from the shared database cache (built up by the
+// background scanner and by prior searches) on top of this request's own
+// live HOF pages. This is what lets later searches reach further into the
+// Hall of Fame than a single request's live scan budget ever could.
+const DB_POOL_LIMIT = 3000;
+
 // There's no meaningful "right" fair fight cutoff to ask the user for up
 // front — the whole point is to find *something* attackable. So instead of a
 // fixed range, widen the fair-fight ceiling in steps until enough matches
@@ -27,12 +35,18 @@ const ATTACK_HISTORY_MAX_PAGES = 5;
 // reaching into "you will lose this" territory.
 const FAIR_FIGHT_TIERS = [1, 1.5, 2, 2.5, 3];
 
+interface CandidateInfo {
+  level: number;
+  categories: { category: TornHofCategory; value: number | string; rank: string }[];
+}
+
 export async function runSearch(options: SearchOptions): Promise<SearchResponse> {
   const { apiKey } = options;
 
   const self = await getOwnProfile(apiKey);
 
-  // 1. Build a candidate pool from the public Torn Hall of Fame.
+  // 1. Build a candidate pool from this request's own live scan of the
+  // public Torn Hall of Fame.
   const hofRequests: { category: TornHofCategory; page: number }[] = [];
   for (const category of options.categories) {
     for (let page = 0; page < options.pagesPerCategory; page++) {
@@ -40,7 +54,7 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
     }
   }
 
-  const candidateEntries = new Map<number, { entry: TornHofEntry; categories: { category: TornHofCategory; value: number | string; rank: string }[] }>();
+  const candidateEntries = new Map<number, CandidateInfo>();
 
   let hofErrors = 0;
   let lastHofError: TornApiError | null = null;
@@ -70,17 +84,59 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
       if (existing) {
         existing.categories.push(hofRef);
       } else {
-        candidateEntries.set(entry.id, { entry, categories: [hofRef] });
+        candidateEntries.set(entry.id, { level: entry.level, categories: [hofRef] });
       }
+    }
+  }
+
+  const liveCandidateIds = Array.from(candidateEntries.keys());
+
+  // 2. Estimate battle stats / fair fight ratio for this request's own
+  // live-scanned candidates via FFScouter.
+  const statsMap = new Map<number, FfScouterStats>(await getFairFightStats(apiKey, liveCandidateIds));
+
+  // 2b. Widen the pool with the shared database cache — everyone the
+  // background scanner (or an earlier search) has already recorded, so this
+  // search can look far deeper into the Hall of Fame than its own live pages
+  // cover. Entirely optional: if no database is configured, or the query
+  // fails for any reason, the search just proceeds live-only exactly as
+  // before. Cached fair-fight numbers are provisional — anything actually
+  // considered for a match gets re-verified against FFScouter before it's
+  // ever shown (see the tier loop below).
+  const cachedIds = new Set<number>();
+  const sql = getSql();
+  if (sql) {
+    try {
+      await ensureSchema(sql);
+      const dbRows = await queryCandidatePool(sql, options.minLevel, DB_POOL_LIMIT);
+      for (const row of dbRows) {
+        const id = Number(row.id);
+        if (id === self.id || candidateEntries.has(id)) continue;
+        const categories = Object.entries(row.hof_categories).map(([category, v]) => ({
+          category: category as TornHofCategory,
+          value: v.value,
+          rank: v.rank,
+        }));
+        candidateEntries.set(id, { level: row.level, categories });
+        statsMap.set(id, {
+          player_id: id,
+          fair_fight: row.fair_fight,
+          bs_estimate: row.bs_estimate != null ? Number(row.bs_estimate) : null,
+          bs_estimate_human: row.bs_estimate_human,
+          bss_public: null,
+          last_updated: null,
+          source: "cache",
+        });
+        cachedIds.add(id);
+      }
+    } catch (err) {
+      console.error("Player cache lookup failed, continuing live-only:", err);
     }
   }
 
   const candidateIds = Array.from(candidateEntries.keys());
 
-  // 2. Estimate battle stats / fair fight ratio for every candidate via FFScouter.
-  const ffStats = await getFairFightStats(apiKey, candidateIds);
-
-  // 2b. Optionally exclude opponents this key has already attacked, so you
+  // 2c. Optionally exclude opponents this key has already attacked, so you
   // don't keep hitting the same targets.
   let previouslyAttackedIds: Set<number> | null = null;
   if (options.excludePreviouslyAttacked) {
@@ -103,21 +159,26 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   // fight tiers above are still doing real filtering in that case).
   const ownTotalStats = self.battlestats?.total ?? null;
 
+  function passesSafety(stats: FfScouterStats | undefined): stats is FfScouterStats {
+    if (!stats || stats.fair_fight == null) return false;
+    if (ownTotalStats != null && stats.bs_estimate != null && stats.bs_estimate > ownTotalStats) return false;
+    return true;
+  }
+
   // Everyone who clears the level floor, has a usable fair-fight estimate,
   // isn't a certain loss on raw stats, and (if requested) hasn't already
   // been attacked by this key — ranked highest level first (fair fight as
   // the tiebreaker). This ordering is fixed up front; the tier loop below
-  // only changes how far down it we're willing to look.
+  // only changes how far down it we're willing to look, and re-checks
+  // anything cache-sourced before trusting it.
   const eligible = candidateIds
-    .map((id) => ({ id, stats: ffStats.get(id), snapshotLevel: candidateEntries.get(id)?.entry.level ?? 0 }))
-    .filter((c): c is { id: number; stats: NonNullable<typeof c.stats>; snapshotLevel: number } => {
-      if (!c.stats || c.stats.fair_fight == null) return false;
+    .map((id) => ({ id, snapshotLevel: candidateEntries.get(id)?.level ?? 0 }))
+    .filter((c) => {
       if (c.snapshotLevel < options.minLevel) return false;
       if (previouslyAttackedIds?.has(c.id)) return false;
-      if (ownTotalStats != null && c.stats.bs_estimate != null && c.stats.bs_estimate > ownTotalStats) return false;
-      return true;
+      return passesSafety(statsMap.get(c.id));
     })
-    .sort((a, b) => b.snapshotLevel - a.snapshotLevel || (a.stats.fair_fight ?? 0) - (b.stats.fair_fight ?? 0));
+    .sort((a, b) => b.snapshotLevel - a.snapshotLevel || (statsMap.get(a.id)!.fair_fight ?? 0) - (statsMap.get(b.id)!.fair_fight ?? 0));
 
   // 3. Widen the fair-fight ceiling tier by tier, live-checking status
   // (hospital/traveling/abroad/etc.) only for candidates not already
@@ -125,23 +186,41 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   // matches or run out of budget.
   const matches: MatchedPlayer[] = [];
   const checked = new Set<number>();
+  const refreshedStats: { id: number; fair_fight: number | null; bs_estimate: number | null; bs_estimate_human: string | null }[] = [];
   let statusChecksSpent = 0;
   let fairFightCeilingUsed: number | null = null;
 
   for (const tier of FAIR_FIGHT_TIERS) {
     if (matches.length >= options.limit || statusChecksSpent >= MAX_STATUS_CHECKS) break;
 
-    const tierCandidates = eligible.filter((c) => !checked.has(c.id) && c.stats.fair_fight! <= tier);
+    const tierCandidates = eligible.filter((c) => !checked.has(c.id) && statsMap.get(c.id)!.fair_fight! <= tier);
     if (tierCandidates.length === 0) continue;
 
     const remainingBudget = MAX_STATUS_CHECKS - statusChecksSpent;
     const batch = tierCandidates.slice(0, remainingBudget);
     fairFightCeilingUsed = tier;
 
-    await mapWithConcurrency(batch, STATUS_CHECK_CONCURRENCY, async ({ id, stats }) => {
+    // Anything sourced from the cache gets a fresh FFScouter read before we
+    // spend a live status check on it — battle stats drift over time, and
+    // we only ever want to show numbers verified right now.
+    const toRefresh = batch.filter((c) => cachedIds.has(c.id)).map((c) => c.id);
+    if (toRefresh.length > 0) {
+      const refreshed = await getFairFightStats(apiKey, toRefresh);
+      for (const [id, stats] of refreshed) {
+        statsMap.set(id, stats);
+        cachedIds.delete(id);
+        refreshedStats.push({ id, fair_fight: stats.fair_fight, bs_estimate: stats.bs_estimate, bs_estimate_human: stats.bs_estimate_human });
+      }
+    }
+
+    await mapWithConcurrency(batch, STATUS_CHECK_CONCURRENCY, async ({ id }) => {
       checked.add(id);
       statusChecksSpent++;
       if (matches.length >= options.limit) return;
+
+      const stats = statsMap.get(id);
+      if (!passesSafety(stats) || stats.fair_fight! > tier) return; // no longer qualifies post-refresh
+
       try {
         const profile = await getPlayerStatus(apiKey, id);
         if (profile.status.state !== ATTACKABLE_STATE) return;
@@ -174,6 +253,31 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   // Highest level first (the "big name, weak fighter" target), lowest fair
   // fight as the tiebreaker among equal levels.
   matches.sort((a, b) => b.level - a.level || (a.fair_fight ?? 0) - (b.fair_fight ?? 0));
+
+  // 4. Best-effort: feed everything this search learned back into the
+  // shared cache after the response is already on its way out, so it never
+  // adds latency and a cache hiccup never breaks the search itself.
+  if (sql) {
+    const hofEntriesToCache = pages.flatMap(({ category, entries }) =>
+      entries
+        .filter((e) => e.id !== self.id)
+        .map((e) => ({ id: e.id, name: e.username, level: e.level, faction_id: e.faction_id, category, value: e.value, rank: e.rank }))
+    );
+    const liveStatsToCache = liveCandidateIds
+      .map((id) => statsMap.get(id))
+      .filter((s): s is FfScouterStats => !!s && s.fair_fight != null)
+      .map((s) => ({ id: s.player_id, fair_fight: s.fair_fight, bs_estimate: s.bs_estimate, bs_estimate_human: s.bs_estimate_human }));
+
+    after(async () => {
+      try {
+        if (hofEntriesToCache.length > 0) await upsertHofEntries(sql, hofEntriesToCache);
+        if (liveStatsToCache.length > 0) await upsertStats(sql, liveStatsToCache);
+        if (refreshedStats.length > 0) await upsertStats(sql, refreshedStats);
+      } catch (err) {
+        console.error("Player cache write failed:", err);
+      }
+    });
+  }
 
   return {
     self,
