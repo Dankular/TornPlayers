@@ -171,7 +171,8 @@ export default function Home() {
         </div>
         <p className="mt-3 text-[11px] text-slate-500">
           No fair-fight range to set — every Hall of Fame category is scanned, and the search automatically widens
-          how hard a fight it&apos;s willing to accept until it fills the result list (easiest fights first).
+          how hard a fight it&apos;s willing to accept until it fills the result list (easiest fights first, never
+          past fair fight 3 or above your own battle stats).
         </p>
 
         <label className="mt-4 flex items-center gap-2 text-sm text-slate-300">
@@ -217,8 +218,9 @@ export default function Home() {
 
           {result.matches.length === 0 ? (
             <p className="rounded-lg border border-torn-border bg-torn-panel p-6 text-sm text-slate-400">
-              No attackable matches found even after widening the fair fight range as far as it goes. Try lowering
-              min level or scanning more pages per category to grow the candidate pool.
+              No attackable matches found within a safe fair fight range. Try lowering min level or scanning more
+              pages per category to grow the candidate pool — we won&apos;t widen past fair fight 3 or above your
+              own battle stats, since that&apos;s a losing fight.
             </p>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-torn-border">
