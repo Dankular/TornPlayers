@@ -110,7 +110,6 @@ export interface MatchedPlayer {
   bs_estimate_human: string | null;
   last_action: number;
   hof_categories: { category: TornHofCategory; value: number | string; rank: string }[];
-  previously_attacked: AttackRecord | null;
 }
 
 export interface SearchResponse {
@@ -130,7 +129,7 @@ export interface SearchOptions {
   pagesPerCategory: number; // each page = up to 100 entries
   minLevel: number;
   limit: number;
-  // When true, restrict results to opponents this key has attacked before
-  // (requires the "attacks" selection on the key).
-  previouslyAttackedOnly: boolean;
+  // When true, exclude opponents this key has attacked before (requires
+  // the "attacks" selection on the key) — avoids re-hitting the same targets.
+  excludePreviouslyAttacked: boolean;
 }

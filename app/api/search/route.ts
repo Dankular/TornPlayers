@@ -14,7 +14,7 @@ interface SearchBody {
   pagesPerCategory?: number;
   minLevel?: number;
   limit?: number;
-  previouslyAttackedOnly?: boolean;
+  excludePreviouslyAttacked?: boolean;
 }
 
 export async function POST(req: NextRequest) {
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
     pagesPerCategory: clamp(body.pagesPerCategory ?? 1, 1, 3),
     minLevel: clamp(typeof body.minLevel === "number" ? body.minLevel : 50, 1, 100),
     limit: clamp(body.limit ?? 20, 1, 50),
-    previouslyAttackedOnly: body.previouslyAttackedOnly === true,
+    excludePreviouslyAttacked: body.excludePreviouslyAttacked === true,
   };
 
   try {
