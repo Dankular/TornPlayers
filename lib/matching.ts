@@ -21,8 +21,11 @@ const ATTACK_HISTORY_MAX_PAGES = 5;
 // fixed range, widen the fair-fight ceiling in steps until enough matches
 // are found (or the status-check budget runs out), trying the easiest tier
 // first and only falling back to a harder one when the easy tier comes up
-// empty.
-const FAIR_FIGHT_TIERS = [1, 1.5, 2, 3, 5, 8, 15, 50, Number.POSITIVE_INFINITY];
+// empty. Torn's fair-fight respect bonus caps out at 3x, so a fight above
+// that gives no extra reward for the added risk — this list never goes
+// higher, on purpose, so escalation can widen the search without ever
+// reaching into "you will lose this" territory.
+const FAIR_FIGHT_TIERS = [1, 1.5, 2, 2.5, 3];
 
 export async function runSearch(options: SearchOptions): Promise<SearchResponse> {
   const { apiKey } = options;
@@ -93,17 +96,25 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
     }
   }
 
+  // Hard safety ceiling: never match someone whose estimated total battle
+  // stats outright exceed the key owner's own — that's a losing fight
+  // regardless of what the fair-fight number says. Only enforceable when the
+  // key exposes the owner's own battlestats; skipped otherwise (the fair
+  // fight tiers above are still doing real filtering in that case).
+  const ownTotalStats = self.battlestats?.total ?? null;
+
   // Everyone who clears the level floor, has a usable fair-fight estimate,
-  // and (if requested) hasn't already been attacked by this key — ranked
-  // highest level first (fair fight as the tiebreaker). This ordering is
-  // fixed up front; the tier loop below only changes how far down it we're
-  // willing to look.
+  // isn't a certain loss on raw stats, and (if requested) hasn't already
+  // been attacked by this key — ranked highest level first (fair fight as
+  // the tiebreaker). This ordering is fixed up front; the tier loop below
+  // only changes how far down it we're willing to look.
   const eligible = candidateIds
     .map((id) => ({ id, stats: ffStats.get(id), snapshotLevel: candidateEntries.get(id)?.entry.level ?? 0 }))
     .filter((c): c is { id: number; stats: NonNullable<typeof c.stats>; snapshotLevel: number } => {
       if (!c.stats || c.stats.fair_fight == null) return false;
       if (c.snapshotLevel < options.minLevel) return false;
       if (previouslyAttackedIds?.has(c.id)) return false;
+      if (ownTotalStats != null && c.stats.bs_estimate != null && c.stats.bs_estimate > ownTotalStats) return false;
       return true;
     })
     .sort((a, b) => b.snapshotLevel - a.snapshotLevel || (a.stats.fair_fight ?? 0) - (b.stats.fair_fight ?? 0));
