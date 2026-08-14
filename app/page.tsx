@@ -48,6 +48,7 @@ export default function Home() {
   const [minLevel, setMinLevel] = useState(50);
   const [limit, setLimit] = useState(20);
   const [pagesPerCategory, setPagesPerCategory] = useState(1);
+  const [previouslyAttackedOnly, setPreviouslyAttackedOnly] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +63,7 @@ export default function Home() {
       const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, minLevel, limit, pagesPerCategory }),
+        body: JSON.stringify({ apiKey, minLevel, limit, pagesPerCategory, previouslyAttackedOnly }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -173,6 +174,20 @@ export default function Home() {
           how hard a fight it&apos;s willing to accept until it fills the result list (easiest fights first).
         </p>
 
+        <label className="mt-4 flex items-center gap-2 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={previouslyAttackedOnly}
+            onChange={(e) => setPreviouslyAttackedOnly(e.target.checked)}
+            className="h-4 w-4 rounded border-torn-border bg-black/30 accent-torn-accent"
+          />
+          Previously attacked
+          <span className="text-[11px] text-slate-500">
+            — only show opponents you&apos;ve attacked in the last 180 days (requires the &quot;attacks&quot;
+            selection on your key)
+          </span>
+        </label>
+
         <button
           type="submit"
           disabled={loading}
@@ -216,6 +231,7 @@ export default function Home() {
                     <th className="px-3 py-2">Est. stats</th>
                     <th className="px-3 py-2">Status</th>
                     <th className="px-3 py-2">Last action</th>
+                    <th className="px-3 py-2">Prev. attacked</th>
                     <th className="px-3 py-2">HOF</th>
                   </tr>
                 </thead>
@@ -238,14 +254,24 @@ function MatchRow({ match }: { match: MatchedPlayer }) {
     <tr className="border-t border-torn-border/60 hover:bg-white/5">
       <td className="px-3 py-2">
         <a
-          href={`https://www.torn.com/profiles.php?XID=${match.id}`}
+          href={`https://www.torn.com/page.php?sid=attack&user2ID=${match.id}`}
           target="_blank"
           rel="noreferrer"
           className="font-medium text-slate-100 hover:text-torn-accent hover:underline"
+          title="Attack"
         >
           {match.name}
         </a>
         <span className="ml-1 text-xs text-slate-500">[{match.id}]</span>
+        <a
+          href={`https://www.torn.com/profiles.php?XID=${match.id}`}
+          target="_blank"
+          rel="noreferrer"
+          className="ml-1 text-xs text-slate-500 hover:text-torn-accent2 hover:underline"
+          title="View profile"
+        >
+          profile
+        </a>
       </td>
       <td className={`px-3 py-2 font-semibold ${levelColor(match.level)}`}>{match.level}</td>
       <td className={`px-3 py-2 font-semibold ${fairFightColor(match.fair_fight)}`}>
@@ -258,6 +284,15 @@ function MatchRow({ match }: { match: MatchedPlayer }) {
         </span>
       </td>
       <td className="px-3 py-2 text-slate-400">{timeAgo(match.last_action)}</td>
+      <td className="px-3 py-2 text-slate-400">
+        {match.previously_attacked ? (
+          <span title={match.previously_attacked.result}>
+            {match.previously_attacked.result} · {timeAgo(match.previously_attacked.timestamp)}
+          </span>
+        ) : (
+          "—"
+        )}
+      </td>
       <td className="px-3 py-2">
         <div className="flex flex-wrap gap-1">
           {match.hof_categories.slice(0, 3).map((c) => (

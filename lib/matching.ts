@@ -1,7 +1,7 @@
 import { mapWithConcurrency } from "./concurrency";
 import { getFairFightStats } from "./ffscouter";
-import { getHofPage, getOwnProfile, getPlayerStatus, TornApiError } from "./torn";
-import type { MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry } from "./types";
+import { getHofPage, getOutgoingAttackHistory, getOwnProfile, getPlayerStatus, TornApiError } from "./torn";
+import type { AttackRecord, MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry } from "./types";
 
 const ATTACKABLE_STATE = "Okay";
 // Total live status-check budget for a single search, spent across however
@@ -10,6 +10,11 @@ const ATTACKABLE_STATE = "Okay";
 const MAX_STATUS_CHECKS = 80;
 const STATUS_CHECK_CONCURRENCY = 8;
 const HOF_PAGE_CONCURRENCY = 4;
+
+// How far back (and how many pages of 100) to look when checking prior
+// attack history for the "Previously attacked" filter.
+const ATTACK_HISTORY_LOOKBACK_DAYS = 180;
+const ATTACK_HISTORY_MAX_PAGES = 5;
 
 // There's no meaningful "right" fair fight cutoff to ask the user for up
 // front — the whole point is to find *something* attackable. So instead of a
@@ -72,15 +77,32 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   // 2. Estimate battle stats / fair fight ratio for every candidate via FFScouter.
   const ffStats = await getFairFightStats(apiKey, candidateIds);
 
-  // Everyone who clears the level floor and has a usable fair-fight estimate,
-  // ranked highest level first (fair fight as the tiebreaker). This ordering
-  // is fixed up front; the tier loop below only changes how far down it
-  // we're willing to look.
+  // 2b. Optionally restrict to opponents this key has attacked before.
+  let attackHistory: Map<number, AttackRecord> | null = null;
+  if (options.previouslyAttackedOnly) {
+    const sinceTimestamp = Math.floor(Date.now() / 1000) - ATTACK_HISTORY_LOOKBACK_DAYS * 86400;
+    try {
+      attackHistory = await getOutgoingAttackHistory(apiKey, sinceTimestamp, ATTACK_HISTORY_MAX_PAGES);
+    } catch (err) {
+      if (err instanceof TornApiError && err.code === 16) {
+        throw new TornApiError(16, "This key is missing the attack history permission needed for the \"Previously attacked\" filter.");
+      }
+      throw err;
+    }
+  }
+
+  // Everyone who clears the level floor, has a usable fair-fight estimate,
+  // and (if requested) has been attacked by this key before — ranked
+  // highest level first (fair fight as the tiebreaker). This ordering is
+  // fixed up front; the tier loop below only changes how far down it we're
+  // willing to look.
   const eligible = candidateIds
     .map((id) => ({ id, stats: ffStats.get(id), snapshotLevel: candidateEntries.get(id)?.entry.level ?? 0 }))
     .filter((c): c is { id: number; stats: NonNullable<typeof c.stats>; snapshotLevel: number } => {
       if (!c.stats || c.stats.fair_fight == null) return false;
-      return c.snapshotLevel >= options.minLevel;
+      if (c.snapshotLevel < options.minLevel) return false;
+      if (attackHistory && !attackHistory.has(c.id)) return false;
+      return true;
     })
     .sort((a, b) => b.snapshotLevel - a.snapshotLevel || (a.stats.fair_fight ?? 0) - (b.stats.fair_fight ?? 0));
 
@@ -124,6 +146,7 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
           bs_estimate_human: stats.bs_estimate_human,
           last_action: profile.last_action?.timestamp ?? 0,
           hof_categories: candidate?.categories ?? [],
+          previously_attacked: attackHistory?.get(id) ?? null,
         });
       } catch (err) {
         if (err instanceof TornApiError && err.code === 5) {

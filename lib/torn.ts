@@ -1,4 +1,4 @@
-import type { OwnProfile, TornHofCategory, TornHofEntry, UserStatus } from "./types";
+import type { AttackRecord, OwnProfile, TornHofCategory, TornHofEntry, UserStatus } from "./types";
 
 const TORN_V2_BASE = "https://api.torn.com/v2";
 
@@ -106,6 +106,58 @@ export async function getHofPage(
     offset,
   });
   return data.hof;
+}
+
+interface AttacksResponse {
+  attacks: {
+    started: number;
+    ended: number;
+    defender: { id: number };
+    result: string;
+  }[];
+}
+
+/**
+ * The key owner's outgoing attack history (requires the "attacks" selection
+ * on the key — already part of the FFScouter-compatible key this app asks
+ * for). Returns the most recent record per opponent, going back at most
+ * `sinceTimestamp` and `maxPages` * 100 attacks, whichever is hit first.
+ */
+export async function getOutgoingAttackHistory(
+  key: string,
+  sinceTimestamp: number,
+  maxPages: number
+): Promise<Map<number, AttackRecord>> {
+  const history = new Map<number, AttackRecord>();
+  let to: number | undefined;
+
+  for (let page = 0; page < maxPages; page++) {
+    const params: Record<string, string | number> = {
+      filters: "outgoing",
+      sort: "DESC",
+      limit: 100,
+      from: sinceTimestamp,
+    };
+    if (to !== undefined) params.to = to;
+
+    const data = await tornFetch<AttacksResponse>("/user/attacks", key, params);
+    if (data.attacks.length === 0) break;
+
+    for (const attack of data.attacks) {
+      // Attacks arrive newest-first, so the first time we see an opponent
+      // here is their most recent encounter.
+      if (!history.has(attack.defender.id)) {
+        history.set(attack.defender.id, { result: attack.result, timestamp: attack.ended });
+      }
+    }
+
+    if (data.attacks.length < 100) break; // exhausted everything back to sinceTimestamp
+
+    const oldestStarted = Math.min(...data.attacks.map((a) => a.started));
+    to = oldestStarted - 1;
+  }
+
+  return history;
 }
 
 /** Public profile (status/level/faction) for an arbitrary player id. */

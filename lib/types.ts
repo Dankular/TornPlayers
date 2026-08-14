@@ -93,6 +93,12 @@ export interface FfScouterStats {
   source: string | null;
 }
 
+// The key owner's most recent outgoing attack against a given opponent.
+export interface AttackRecord {
+  result: string;
+  timestamp: number;
+}
+
 export interface MatchedPlayer {
   id: number;
   name: string;
@@ -104,6 +110,7 @@ export interface MatchedPlayer {
   bs_estimate_human: string | null;
   last_action: number;
   hof_categories: { category: TornHofCategory; value: number | string; rank: string }[];
+  previously_attacked: AttackRecord | null;
 }
 
 export interface SearchResponse {
@@ -123,4 +130,7 @@ export interface SearchOptions {
   pagesPerCategory: number; // each page = up to 100 entries
   minLevel: number;
   limit: number;
+  // When true, restrict results to opponents this key has attacked before
+  // (requires the "attacks" selection on the key).
+  previouslyAttackedOnly: boolean;
 }

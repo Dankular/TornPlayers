@@ -14,6 +14,7 @@ interface SearchBody {
   pagesPerCategory?: number;
   minLevel?: number;
   limit?: number;
+  previouslyAttackedOnly?: boolean;
 }
 
 export async function POST(req: NextRequest) {
@@ -38,6 +39,7 @@ export async function POST(req: NextRequest) {
     pagesPerCategory: clamp(body.pagesPerCategory ?? 1, 1, 3),
     minLevel: clamp(typeof body.minLevel === "number" ? body.minLevel : 50, 1, 100),
     limit: clamp(body.limit ?? 20, 1, 50),
+    previouslyAttackedOnly: body.previouslyAttackedOnly === true,
   };
 
   try {
@@ -48,8 +50,7 @@ export async function POST(req: NextRequest) {
       const status = err.code === 2 ? 401 : err.code === 16 ? 403 : 502;
       const message =
         err.code === 16
-          ? "This key doesn't have Hall of Fame access. Use a Public key, or generate a Custom key that includes " +
-            `torn » hof (this link also covers FFScouter's requirements): ${KEY_SETUP_URL}`
+          ? `${err.message} Generate a Custom key with everything this app needs (Hall of Fame + attack history + FFScouter's requirements): ${KEY_SETUP_URL}`
           : `Torn API error: ${err.message}`;
       return NextResponse.json({ error: message, code: err.code }, { status });
     }
