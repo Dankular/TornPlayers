@@ -84,10 +84,11 @@ export default function Home() {
           Torn<span className="text-torn-accent">Players</span>
         </h1>
         <p className="mt-2 max-w-2xl text-sm text-slate-400">
-          Enter your Torn API key. We scan every category of the public Torn Hall of Fame, score every candidate
-          with FFScouter&apos;s fair-fight estimates, and automatically widen the search until we find attackable
-          targets — filtering out anyone in hospital, jail, traveling, or abroad — ranked by{" "}
-          <em>highest level first</em> so you see the big names with weak stats before the small fry.
+          Enter your Torn API key. We scan every category of the public Torn Hall of Fame <em>and</em> search the
+          wider non-hospitalized playerbase directly, score every candidate with FFScouter&apos;s fair-fight
+          estimates, and automatically widen the search until we find attackable targets — filtering out anyone in
+          hospital, jail, traveling, or abroad — ranked by <em>highest level first</em> so you see the big names
+          with weak stats before the small fry.
         </p>
       </header>
 
@@ -215,6 +216,13 @@ export default function Home() {
               · for {result.self.name} (lvl {result.self.level})
             </p>
           </div>
+          {result.search_pool_total != null && (
+            <p className="mb-2 text-xs text-slate-500">
+              Torn reports <span className="text-slate-300">{result.search_pool_total.toLocaleString()}</span>{" "}
+              non-hospitalized players at or above your minimum level — this search samples from that whole pool,
+              not just the Hall of Fame.
+            </p>
+          )}
           <p className="mb-4 text-xs text-slate-500">
             Cache:{" "}
             {result.cache_connected ? (
@@ -301,11 +309,20 @@ function MatchRow({ match }: { match: MatchedPlayer }) {
       <td className="px-3 py-2 text-slate-400">{timeAgo(match.last_action)}</td>
       <td className="px-3 py-2">
         <div className="flex flex-wrap gap-1">
-          {match.hof_categories.slice(0, 3).map((c) => (
-            <span key={c.category} className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-400">
-              {CATEGORY_LABELS[c.category]}
+          {match.hof_categories.length > 0 ? (
+            match.hof_categories.slice(0, 3).map((c) => (
+              <span key={c.category} className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-400">
+                {CATEGORY_LABELS[c.category]}
+              </span>
+            ))
+          ) : (
+            <span
+              className="rounded bg-torn-accent2/10 px-1.5 py-0.5 text-[10px] text-torn-accent2"
+              title="Found via playerbase search, not a Hall of Fame record"
+            >
+              Search match
             </span>
-          ))}
+          )}
         </div>
       </td>
     </tr>

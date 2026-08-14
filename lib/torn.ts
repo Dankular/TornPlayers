@@ -1,4 +1,4 @@
-import type { AttackRecord, OwnProfile, TornHofCategory, TornHofEntry, UserStatus } from "./types";
+import type { AttackRecord, OwnProfile, TornHofCategory, TornHofEntry, UserSearchResult, UserStatus } from "./types";
 
 const TORN_V2_BASE = "https://api.torn.com/v2";
 
@@ -158,6 +158,31 @@ export async function getOutgoingAttackHistory(
   }
 
   return history;
+}
+
+interface UserSearchResponse {
+  search: UserSearchResult[];
+  _metadata: { total?: number };
+}
+
+/**
+ * Searches the whole Torn playerbase by level band and status filters
+ * ('user' -> 'search', API v2) — unlike the Hall of Fame this isn't limited
+ * to record-holders, so it's how we reach ordinary high-level/low-stat
+ * accounts that never placed in a HOF category. Public-key access. Fixed
+ * page size of 25, offset-paginated. Torn flags this selection "Unstable",
+ * so callers should treat failures as recoverable, not fatal.
+ */
+export async function searchUsers(
+  key: string,
+  filters: string[],
+  offset: number
+): Promise<{ results: UserSearchResult[]; total: number | null }> {
+  const data = await tornFetch<UserSearchResponse>("/user/search", key, {
+    filters: filters.join(","),
+    offset,
+  });
+  return { results: data.search, total: data._metadata.total ?? null };
 }
 
 /** Public profile (status/level/faction) for an arbitrary player id. */

@@ -68,6 +68,19 @@ export interface TornHofEntry {
   rank: string;
 }
 
+// A single result row from 'user' -> 'search' (API v2, shipped Aug 2026).
+// Unlike the Hall of Fame, this covers the entire playerbase in a level band
+// (filtered server-side to exclude hospitalized players), not just
+// record-holders — the response itself carries no hospital/jail/travel
+// state, so a live status check is still required before attacking.
+export interface UserSearchResult {
+  id: number;
+  name: string;
+  level: number;
+  online: "Online" | "Idle" | "Offline";
+  faction_id: number;
+}
+
 export interface OwnProfile {
   id: number;
   name: string;
@@ -125,6 +138,12 @@ export interface SearchResponse {
   // guess why results do or don't vary between searches.
   cache_connected: boolean;
   cache_pool_size: number;
+  // How many non-hospitalized players at or above minLevel Torn itself
+  // reports having, per 'user' -> 'search' metadata — null if that lookup
+  // failed (e.g. the endpoint is Unstable and temporarily unavailable).
+  // Purely informational: shows how much of the playerbase this search
+  // could ever have looked at, independent of Hall of Fame coverage.
+  search_pool_total: number | null;
   matches: MatchedPlayer[];
 }
 

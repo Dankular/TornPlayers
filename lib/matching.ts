@@ -1,9 +1,9 @@
 import { after } from "next/server";
 import { mapWithConcurrency } from "./concurrency";
-import { ensureSchema, getShownHistory, getSql, queryCandidatePool, recordShown, upsertHofEntries, upsertStats } from "./db";
+import { ensureSchema, getShownHistory, getSql, queryCandidatePool, recordShown, upsertHofEntries, upsertPlayerBasics, upsertStats } from "./db";
 import { getFairFightStats } from "./ffscouter";
-import { getHofPage, getOutgoingAttackHistory, getOwnProfile, getPlayerStatus, TornApiError } from "./torn";
-import type { FfScouterStats, MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry } from "./types";
+import { getHofPage, getOutgoingAttackHistory, getOwnProfile, getPlayerStatus, searchUsers, TornApiError } from "./torn";
+import type { FfScouterStats, MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry, UserSearchResult } from "./types";
 
 const ATTACKABLE_STATE = "Okay";
 // Total live status-check budget for a single search, spent across however
@@ -12,6 +12,17 @@ const ATTACKABLE_STATE = "Okay";
 const MAX_STATUS_CHECKS = 80;
 const STATUS_CHECK_CONCURRENCY = 8;
 const HOF_PAGE_CONCURRENCY = 4;
+
+// 'user' -> 'search' covers the whole non-hospitalized playerbase in a level
+// band, not just Hall of Fame record-holders — a much bigger source of
+// "high level, low stats" candidates that never placed in a HOF category.
+// Fixed page size of 25 per Torn's API; scale how many pages we pull per
+// live search with the same "pagesPerCategory" knob used for HOF depth, so
+// one slider controls both.
+const SEARCH_PAGE_SIZE = 25;
+const SEARCH_LIVE_PAGES_MIN = 4;
+const SEARCH_LIVE_PAGES_MAX = 12;
+const SEARCH_PAGE_CONCURRENCY = 4;
 
 // How far back (and how many pages of 100) to look when checking prior
 // attack history for the "Previously attacked" exclusion filter.
@@ -89,10 +100,44 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
     }
   }
 
+  // 1b. Widen the live pool beyond Hall of Fame extremes with 'user' ->
+  // 'search' — the whole non-hospitalized playerbase at or above minLevel,
+  // server-side filtered so we never waste FFScouter/status-check budget on
+  // someone already known to be unreachable. Best-effort: a failure here
+  // (the endpoint is flagged Unstable by Torn) just falls back to
+  // HOF-only, exactly like today.
+  const searchPages = Math.min(SEARCH_LIVE_PAGES_MAX, Math.max(SEARCH_LIVE_PAGES_MIN, options.pagesPerCategory * 4));
+  const searchOffsets = Array.from({ length: searchPages }, (_, i) => i * SEARCH_PAGE_SIZE);
+  const searchFilters = [`level:>=:${options.minLevel}`, "notInHospital"];
+
+  let searchPoolTotal: number | null = null;
+  const liveSearchResults: UserSearchResult[] = [];
+
+  const searchPageResults = await mapWithConcurrency(searchOffsets, SEARCH_PAGE_CONCURRENCY, async (offset) => {
+    try {
+      return await searchUsers(apiKey, searchFilters, offset);
+    } catch {
+      // Unstable selection — a page failing shouldn't sink the search.
+      return { results: [] as UserSearchResult[], total: null };
+    }
+  });
+
+  for (const { results, total } of searchPageResults) {
+    if (total != null) searchPoolTotal = total;
+    for (const u of results) {
+      if (u.id === self.id) continue;
+      liveSearchResults.push(u);
+      if (!candidateEntries.has(u.id)) {
+        candidateEntries.set(u.id, { level: u.level, categories: [] });
+      }
+    }
+  }
+
   const liveCandidateIds = Array.from(candidateEntries.keys());
 
   // 2. Estimate battle stats / fair fight ratio for this request's own
-  // live-scanned candidates via FFScouter.
+  // live-scanned candidates (both Hall of Fame and search sourced) via
+  // FFScouter.
   const statsMap = new Map<number, FfScouterStats>(await getFairFightStats(apiKey, liveCandidateIds));
 
   // 2b. Widen the pool with the shared database cache — everyone the
@@ -282,6 +327,12 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
         .filter((e) => e.id !== self.id)
         .map((e) => ({ id: e.id, name: e.username, level: e.level, faction_id: e.faction_id, category, value: e.value, rank: e.rank }))
     );
+    const searchEntriesToCache = liveSearchResults.map((u) => ({
+      id: u.id,
+      name: u.name,
+      level: u.level,
+      faction_id: u.faction_id,
+    }));
     const liveStatsToCache = liveCandidateIds
       .map((id) => statsMap.get(id))
       .filter((s): s is FfScouterStats => !!s && s.fair_fight != null)
@@ -291,6 +342,7 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
     after(async () => {
       try {
         if (hofEntriesToCache.length > 0) await upsertHofEntries(sql, hofEntriesToCache);
+        if (searchEntriesToCache.length > 0) await upsertPlayerBasics(sql, searchEntriesToCache);
         if (liveStatsToCache.length > 0) await upsertStats(sql, liveStatsToCache);
         if (refreshedStats.length > 0) await upsertStats(sql, refreshedStats);
         if (shownIds.length > 0) await recordShown(sql, self.id, shownIds);
@@ -307,6 +359,7 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
     fair_fight_ceiling_used: fairFightCeilingUsed,
     cache_connected: sql !== null,
     cache_pool_size: cachePoolSize,
+    search_pool_total: searchPoolTotal,
     matches: finalMatches,
   };
 }

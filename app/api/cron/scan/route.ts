@@ -1,7 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { advanceScanCursor, ensureSchema, getSql, pickScanCategory, upsertHofEntries, upsertStats } from "@/lib/db";
+import {
+  advanceScanCursor,
+  advanceSearchCursor,
+  ensureSchema,
+  getSql,
+  pickScanCategory,
+  pickSearchBucket,
+  upsertHofEntries,
+  upsertPlayerBasics,
+  upsertStats,
+} from "@/lib/db";
 import { getFairFightStats } from "@/lib/ffscouter";
-import { getHofPage } from "@/lib/torn";
+import { getHofPage, searchUsers } from "@/lib/torn";
+import { LEVEL_SEARCH_BUCKETS } from "@/lib/constants";
 import { TORN_HOF_CATEGORIES } from "@/lib/types";
 
 export const maxDuration = 60;
@@ -13,6 +24,11 @@ export const maxDuration = 60;
 // over once a category's depth is exhausted.
 const CATEGORIES_PER_RUN = 3;
 const PAGE_SIZE = 100;
+
+// Same round-robin idea, but for 'user' -> 'search' level buckets — this is
+// the much bigger, non-HOF-limited pool, so it's worth its own budget.
+const SEARCH_BUCKETS_PER_RUN = 2;
+const SEARCH_PAGE_SIZE = 25;
 
 export async function GET(req: NextRequest) {
   // Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` when CRON_SECRET
@@ -87,5 +103,49 @@ export async function GET(req: NextRequest) {
     results.push({ category: cursor.category, offset: cursor.next_offset, fetched: entries.length, wrapped });
   }
 
-  return NextResponse.json({ scanned: results });
+  const searchResults: { bucket: string; offset: number; fetched: number; total: number | null; wrapped: boolean }[] = [];
+
+  for (let i = 0; i < SEARCH_BUCKETS_PER_RUN; i++) {
+    const cursor = await pickSearchBucket(sql, LEVEL_SEARCH_BUCKETS);
+
+    let results2: Awaited<ReturnType<typeof searchUsers>>;
+    try {
+      results2 = await searchUsers(
+        scanKey,
+        [`level:>=:${cursor.min_level}`, `level:<=:${cursor.max_level}`, "notInHospital"],
+        cursor.next_offset
+      );
+    } catch (err) {
+      searchResults.push({ bucket: cursor.bucket, offset: cursor.next_offset, fetched: 0, total: null, wrapped: false });
+      console.error(`Search scan of ${cursor.bucket}@${cursor.next_offset} failed:`, err);
+      continue;
+    }
+
+    const { results: users, total } = results2;
+
+    if (users.length > 0) {
+      await upsertPlayerBasics(
+        sql,
+        users.map((u) => ({ id: u.id, name: u.name, level: u.level, faction_id: u.faction_id }))
+      );
+
+      try {
+        const stats = await getFairFightStats(scanKey, users.map((u) => u.id));
+        const statsRows = Array.from(stats.values())
+          .filter((s) => s.fair_fight != null)
+          .map((s) => ({ id: s.player_id, fair_fight: s.fair_fight, bs_estimate: s.bs_estimate, bs_estimate_human: s.bs_estimate_human }));
+        if (statsRows.length > 0) await upsertStats(sql, statsRows);
+      } catch (err) {
+        console.error("FFScouter refresh during search scan failed:", err);
+      }
+    }
+
+    const wrapped = users.length < SEARCH_PAGE_SIZE;
+    const nextOffset = wrapped ? 0 : cursor.next_offset + SEARCH_PAGE_SIZE;
+    await advanceSearchCursor(sql, cursor.bucket, nextOffset, total);
+
+    searchResults.push({ bucket: cursor.bucket, offset: cursor.next_offset, fetched: users.length, total, wrapped });
+  }
+
+  return NextResponse.json({ scanned: results, searched: searchResults });
 }

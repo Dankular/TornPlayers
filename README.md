@@ -10,9 +10,16 @@ abroad — leaving a short list of players you can actually attack right now.
 
 1. **Your profile** — `POST /v2/user?selections=profile,battlestats` gets your
    level, faction, and (if your key allows it) battle stats.
-2. **Candidate pool** — `GET /v2/torn/hof?cat=<category>` pages through the
-   public Hall of Fame (level, rank, attacks won, defends won, offences,
-   awards, net worth, etc.) to build a pool of notable, active players.
+2. **Candidate pool** — two sources, combined:
+   - `GET /v2/torn/hof?cat=<category>` pages through the public Hall of Fame
+     (level, rank, attacks won, defends won, offences, awards, net worth,
+     etc.) — notable, record-holding players.
+   - `GET /v2/user/search?filters=level:>=:<minLevel>,notInHospital` pages
+     through the *entire* non-hospitalized playerbase at or above your level
+     floor — most "high level, low stats" accounts never placed in a Hall of
+     Fame category at all, so this is where most real matches come from.
+     Torn flags this selection `Unstable`; a failure here just falls back to
+     Hall-of-Fame-only, same as before it existed.
 3. **Fair-fight scoring** — all candidate IDs are sent to FFScouter's
    `get-stats` endpoint (authenticated with the same Torn key) to get an
    estimated fair-fight ratio against you. Only candidates inside your chosen
@@ -20,7 +27,9 @@ abroad — leaving a short list of players you can actually attack right now.
 4. **Live status check** — the best-scoring candidates get a fresh
    `GET /v2/user/{id}?selections=profile` lookup; only players whose status is
    `Okay` (not Hospital, Jail, Traveling, Abroad, Federal, ...) make the final
-   list.
+   list. (`user/search` already excludes Hospital server-side, but it can't
+   also exclude Jail/Traveling in the same request, so this step still runs
+   for every candidate regardless of source.)
 5. **Shared cache (optional)** — if a database is connected, every search
    also draws from a `players` table that accumulates Hall of Fame sightings
    over time (from a background scanner and from prior searches), so later
@@ -103,8 +112,11 @@ Once those are set, `vercel.json` schedules `/api/cron/scan` once daily (the
 Vercel Hobby plan rejects any cron running more than once/day; Pro allows
 hourly and up — bump the schedule in `vercel.json` if you're on Pro). Each
 run advances a few Hall of Fame categories one page deeper (round-robin
-across all 14, wrapping around once a category's depth is exhausted). You
-can also trigger a scan manually any time: `GET /api/cron/scan` (with a
+across all 14, wrapping around once a category's depth is exhausted) *and*
+a couple of `user/search` level buckets (round-robin across ten 10-level
+bands from 10 up to 100, same wrap-around behavior) — this second scan is
+what builds up the much larger non-Hall-of-Fame candidate pool over time.
+You can also trigger a scan manually any time: `GET /api/cron/scan` (with a
 `CRON_SECRET` set, pass `Authorization: Bearer <secret>`) — worth doing a
 few times by hand right after setup instead of waiting a full day between
 each step of the first scan.

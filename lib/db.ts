@@ -60,6 +60,21 @@ async function createSchema(sql: Sql) {
     )
   `;
 
+  // Round-robin cursor for the 'user' -> 'search' background scan, one row
+  // per level bucket (see LEVEL_SEARCH_BUCKETS) — the same pattern as
+  // hof_scan_cursor, but paging through the whole playerbase in that band
+  // instead of a single Hall of Fame category.
+  await sql`
+    CREATE TABLE IF NOT EXISTS user_search_cursor (
+      bucket TEXT PRIMARY KEY,
+      min_level INT NOT NULL,
+      max_level INT NOT NULL,
+      next_offset INT NOT NULL DEFAULT 0,
+      last_scanned_at TIMESTAMPTZ,
+      total_known INT
+    )
+  `;
+
   // Per-searcher "already shown" history, so repeat searches from the same
   // Torn account rotate through the pool instead of always converging on
   // the same handful of best-ranked players.
@@ -127,6 +142,30 @@ export async function upsertHofEntries(
   });
 }
 
+/**
+ * Upserts players discovered via 'user' -> 'search' — they have no Hall of
+ * Fame category, so unlike upsertHofEntries this never touches
+ * hof_categories on conflict (leaving any HOF placements already on record
+ * untouched rather than clobbering them with an empty object).
+ */
+export async function upsertPlayerBasics(
+  sql: Sql,
+  entries: { id: number; name: string; level: number; faction_id: number | null }[]
+): Promise<void> {
+  if (entries.length === 0) return;
+  await mapWithConcurrency(entries, 10, async (r) => {
+    await sql`
+      INSERT INTO players (id, name, level, faction_id, hof_categories, hof_seen_at)
+      VALUES (${r.id}, ${r.name}, ${r.level}, ${r.faction_id}, '{}'::jsonb, now())
+      ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        level = EXCLUDED.level,
+        faction_id = EXCLUDED.faction_id,
+        hof_seen_at = now()
+    `;
+  });
+}
+
 /** Refreshes cached fair-fight / battle-stat estimates for players already known to us. */
 export async function upsertStats(
   sql: Sql,
@@ -183,6 +222,43 @@ export async function advanceScanCursor(sql: Sql, category: string, nextOffset: 
     UPDATE hof_scan_cursor
     SET next_offset = ${nextOffset}, last_scanned_at = now(), total_known = ${totalKnown}
     WHERE category = ${category}
+  `;
+}
+
+export interface SearchCursor {
+  bucket: string;
+  min_level: number;
+  max_level: number;
+  next_offset: number;
+}
+
+/** Picks the level bucket that's gone longest without a scan (round robin), creating cursor rows as needed. */
+export async function pickSearchBucket(
+  sql: Sql,
+  buckets: { bucket: string; minLevel: number; maxLevel: number }[]
+): Promise<SearchCursor> {
+  await mapWithConcurrency(buckets, buckets.length, async (b) => {
+    await sql`
+      INSERT INTO user_search_cursor (bucket, min_level, max_level)
+      VALUES (${b.bucket}, ${b.minLevel}, ${b.maxLevel})
+      ON CONFLICT (bucket) DO NOTHING
+    `;
+  });
+
+  const [row] = await sql<SearchCursor[]>`
+    SELECT bucket, min_level, max_level, next_offset FROM user_search_cursor
+    WHERE bucket = ANY(${sql.array(buckets.map((b) => b.bucket))})
+    ORDER BY last_scanned_at ASC NULLS FIRST
+    LIMIT 1
+  `;
+  return row;
+}
+
+export async function advanceSearchCursor(sql: Sql, bucket: string, nextOffset: number, totalKnown: number | null): Promise<void> {
+  await sql`
+    UPDATE user_search_cursor
+    SET next_offset = ${nextOffset}, last_scanned_at = now(), total_known = ${totalKnown}
+    WHERE bucket = ${bucket}
   `;
 }
 
