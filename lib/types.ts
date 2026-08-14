@@ -120,6 +120,11 @@ export interface SearchResponse {
   // result list (null if nothing attackable was found at all). Lower is
   // easier; this is informational, not something the caller sets.
   fair_fight_ceiling_used: number | null;
+  // Diagnostics for the optional shared cache — lets the UI show plainly
+  // whether a database is actually connected, rather than leaving you to
+  // guess why results do or don't vary between searches.
+  cache_connected: boolean;
+  cache_pool_size: number;
   matches: MatchedPlayer[];
 }
 

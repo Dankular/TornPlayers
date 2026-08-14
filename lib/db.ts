@@ -59,6 +59,19 @@ async function createSchema(sql: Sql) {
       total_known INT
     )
   `;
+
+  // Per-searcher "already shown" history, so repeat searches from the same
+  // Torn account rotate through the pool instead of always converging on
+  // the same handful of best-ranked players.
+  await sql`
+    CREATE TABLE IF NOT EXISTS shown_matches (
+      searcher_id BIGINT NOT NULL,
+      player_id BIGINT NOT NULL,
+      shown_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (searcher_id, player_id)
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS shown_matches_searcher_idx ON shown_matches (searcher_id, shown_at)`;
 }
 
 /** Idempotent; safe to call on every cold start (cached per warm instance). */
@@ -171,4 +184,28 @@ export async function advanceScanCursor(sql: Sql, category: string, nextOffset: 
     SET next_offset = ${nextOffset}, last_scanned_at = now(), total_known = ${totalKnown}
     WHERE category = ${category}
   `;
+}
+
+/** Every player this searcher has been shown before, newest-shown last. */
+export async function getShownHistory(sql: Sql, searcherId: number): Promise<Map<number, number>> {
+  const rows = await sql<{ player_id: number; shown_at: Date }[]>`
+    SELECT player_id, shown_at FROM shown_matches WHERE searcher_id = ${searcherId}
+  `;
+  const map = new Map<number, number>();
+  for (const row of rows) {
+    map.set(Number(row.player_id), new Date(row.shown_at).getTime());
+  }
+  return map;
+}
+
+/** Marks players as shown to this searcher just now, so they rotate out of near-term results. */
+export async function recordShown(sql: Sql, searcherId: number, playerIds: number[]): Promise<void> {
+  if (playerIds.length === 0) return;
+  await mapWithConcurrency(playerIds, 10, async (id) => {
+    await sql`
+      INSERT INTO shown_matches (searcher_id, player_id, shown_at)
+      VALUES (${searcherId}, ${id}, now())
+      ON CONFLICT (searcher_id, player_id) DO UPDATE SET shown_at = now()
+    `;
+  });
 }

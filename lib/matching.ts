@@ -1,6 +1,6 @@
 import { after } from "next/server";
 import { mapWithConcurrency } from "./concurrency";
-import { ensureSchema, getSql, queryCandidatePool, upsertHofEntries, upsertStats } from "./db";
+import { ensureSchema, getShownHistory, getSql, queryCandidatePool, recordShown, upsertHofEntries, upsertStats } from "./db";
 import { getFairFightStats } from "./ffscouter";
 import { getHofPage, getOutgoingAttackHistory, getOwnProfile, getPlayerStatus, TornApiError } from "./torn";
 import type { FfScouterStats, MatchedPlayer, SearchOptions, SearchResponse, TornHofCategory, TornHofEntry } from "./types";
@@ -105,10 +105,17 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   // ever shown (see the tier loop below).
   const cachedIds = new Set<number>();
   const sql = getSql();
+  let cachePoolSize = 0;
+  let shownAt = new Map<number, number>();
   if (sql) {
     try {
       await ensureSchema(sql);
-      const dbRows = await queryCandidatePool(sql, options.minLevel, DB_POOL_LIMIT);
+      const [dbRows, shownHistory] = await Promise.all([
+        queryCandidatePool(sql, options.minLevel, DB_POOL_LIMIT),
+        getShownHistory(sql, self.id),
+      ]);
+      cachePoolSize = dbRows.length;
+      shownAt = shownHistory;
       for (const row of dbRows) {
         const id = Number(row.id);
         if (id === self.id || candidateEntries.has(id)) continue;
@@ -167,18 +174,26 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
 
   // Everyone who clears the level floor, has a usable fair-fight estimate,
   // isn't a certain loss on raw stats, and (if requested) hasn't already
-  // been attacked by this key — ranked highest level first (fair fight as
-  // the tiebreaker). This ordering is fixed up front; the tier loop below
-  // only changes how far down it we're willing to look, and re-checks
-  // anything cache-sourced before trusting it.
+  // been attacked by this key. Ranked so a repeat search actually surfaces
+  // something new: never-shown-to-this-searcher candidates come first,
+  // then whoever was shown longest ago (so the pool rotates rather than
+  // converging on the same handful of best-ranked players every time),
+  // with level then fair fight breaking ties within each group. The tier
+  // loop below only changes how far down this order we're willing to look,
+  // and re-checks anything cache-sourced before trusting it.
   const eligible = candidateIds
-    .map((id) => ({ id, snapshotLevel: candidateEntries.get(id)?.level ?? 0 }))
+    .map((id) => ({ id, snapshotLevel: candidateEntries.get(id)?.level ?? 0, lastShown: shownAt.get(id) ?? 0 }))
     .filter((c) => {
       if (c.snapshotLevel < options.minLevel) return false;
       if (previouslyAttackedIds?.has(c.id)) return false;
       return passesSafety(statsMap.get(c.id));
     })
-    .sort((a, b) => b.snapshotLevel - a.snapshotLevel || (statsMap.get(a.id)!.fair_fight ?? 0) - (statsMap.get(b.id)!.fair_fight ?? 0));
+    .sort(
+      (a, b) =>
+        a.lastShown - b.lastShown ||
+        b.snapshotLevel - a.snapshotLevel ||
+        (statsMap.get(a.id)!.fair_fight ?? 0) - (statsMap.get(b.id)!.fair_fight ?? 0)
+    );
 
   // 3. Widen the fair-fight ceiling tier by tier, live-checking status
   // (hospital/traveling/abroad/etc.) only for candidates not already
@@ -253,10 +268,14 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
   // Highest level first (the "big name, weak fighter" target), lowest fair
   // fight as the tiebreaker among equal levels.
   matches.sort((a, b) => b.level - a.level || (a.fair_fight ?? 0) - (b.fair_fight ?? 0));
+  const finalMatches = matches.slice(0, options.limit);
 
   // 4. Best-effort: feed everything this search learned back into the
   // shared cache after the response is already on its way out, so it never
-  // adds latency and a cache hiccup never breaks the search itself.
+  // adds latency and a cache hiccup never breaks the search itself. This
+  // includes marking today's results as "shown" to this searcher, which is
+  // what makes the next search rotate to different players instead of
+  // converging on the same best-ranked handful again.
   if (sql) {
     const hofEntriesToCache = pages.flatMap(({ category, entries }) =>
       entries
@@ -267,12 +286,14 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
       .map((id) => statsMap.get(id))
       .filter((s): s is FfScouterStats => !!s && s.fair_fight != null)
       .map((s) => ({ id: s.player_id, fair_fight: s.fair_fight, bs_estimate: s.bs_estimate, bs_estimate_human: s.bs_estimate_human }));
+    const shownIds = finalMatches.map((m) => m.id);
 
     after(async () => {
       try {
         if (hofEntriesToCache.length > 0) await upsertHofEntries(sql, hofEntriesToCache);
         if (liveStatsToCache.length > 0) await upsertStats(sql, liveStatsToCache);
         if (refreshedStats.length > 0) await upsertStats(sql, refreshedStats);
+        if (shownIds.length > 0) await recordShown(sql, self.id, shownIds);
       } catch (err) {
         console.error("Player cache write failed:", err);
       }
@@ -284,6 +305,8 @@ export async function runSearch(options: SearchOptions): Promise<SearchResponse>
     candidates_scanned: candidateIds.length,
     candidates_with_stats: eligible.length,
     fair_fight_ceiling_used: fairFightCeilingUsed,
-    matches: matches.slice(0, options.limit),
+    cache_connected: sql !== null,
+    cache_pool_size: cachePoolSize,
+    matches: finalMatches,
   };
 }

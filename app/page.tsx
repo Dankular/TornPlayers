@@ -215,6 +215,20 @@ export default function Home() {
               · for {result.self.name} (lvl {result.self.level})
             </p>
           </div>
+          <p className="mb-4 text-xs text-slate-500">
+            Cache:{" "}
+            {result.cache_connected ? (
+              <span className="text-torn-accent2">
+                connected, {result.cache_pool_size} cached candidates available — results rotate away from ones
+                you&apos;ve already been shown
+              </span>
+            ) : (
+              <span className="text-torn-accent">
+                not connected — every search is live-only, so the same best-ranked players will keep coming back up
+                until a database is set up (see README)
+              </span>
+            )}
+          </p>
 
           {result.matches.length === 0 ? (
             <p className="rounded-lg border border-torn-border bg-torn-panel p-6 text-sm text-slate-400">
