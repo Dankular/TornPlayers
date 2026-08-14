@@ -1,92 +1,96 @@
-import postgres from "postgres";
+import { createClient, type Client } from "@libsql/client";
 import { mapWithConcurrency } from "./concurrency";
 import type { TornHofCategory } from "./types";
 
-export type Sql = ReturnType<typeof postgres>;
+export type Sql = Client;
 
 let client: Sql | null | undefined; // undefined = not yet resolved, null = no DB configured
 let schemaReady: Promise<void> | null = null;
 
+// SQLite has no native TIMESTAMPTZ, so every stored timestamp is an ISO8601
+// UTC string with an explicit 'Z' — `datetime('now')` alone omits it, and a
+// space-separated (non-'T') string like that gets parsed as *local* time by
+// JS's Date constructor, which would silently corrupt every "last shown" /
+// "last scanned" comparison depending on the server's timezone.
+const NOW_UTC = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
+
 /**
- * Shared player cache, backed by Postgres (Vercel Postgres / Neon, or any
- * standard connection string in DATABASE_URL / POSTGRES_URL). Entirely
+ * Shared player cache, backed by Turso (hosted libSQL/SQLite). Entirely
  * optional — every function here is a no-op (or returns empty) when no
- * connection string is configured, so the app works exactly as before
- * without a database attached.
+ * connection is configured, so the app works exactly as before without a
+ * database attached.
  */
 export function getSql(): Sql | null {
   if (client !== undefined) return client;
 
-  const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
-  if (!url) {
+  const url = process.env.TURSO_DATABASE_URL;
+  const authToken = process.env.TURSO_AUTH_TOKEN;
+  // A remote libsql:// URL is useless without its auth token — treat that
+  // combination as "not configured" rather than letting every query fail.
+  if (!url || (url.startsWith("libsql://") && !authToken)) {
     client = null;
     return null;
   }
 
-  client = postgres(url, {
-    max: 5,
-    idle_timeout: 20,
-    connect_timeout: 10,
-    ssl: url.includes("localhost") || url.includes("127.0.0.1") ? false : "require",
-  });
+  client = createClient({ url, authToken });
   return client;
 }
 
 async function createSchema(sql: Sql) {
-  await sql`
+  await sql.execute(`
     CREATE TABLE IF NOT EXISTS players (
-      id BIGINT PRIMARY KEY,
+      id INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
-      level INT NOT NULL,
-      faction_id BIGINT,
-      hof_categories JSONB NOT NULL DEFAULT '{}'::jsonb,
+      level INTEGER NOT NULL,
+      faction_id INTEGER,
+      hof_categories TEXT NOT NULL DEFAULT '{}',
       fair_fight REAL,
-      bs_estimate BIGINT,
+      bs_estimate INTEGER,
       bs_estimate_human TEXT,
-      hof_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      stats_updated_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      hof_seen_at TEXT NOT NULL DEFAULT (${NOW_UTC}),
+      stats_updated_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (${NOW_UTC})
     )
-  `;
-  await sql`CREATE INDEX IF NOT EXISTS players_level_idx ON players (level DESC)`;
-  await sql`CREATE INDEX IF NOT EXISTS players_fair_fight_idx ON players (fair_fight)`;
+  `);
+  await sql.execute(`CREATE INDEX IF NOT EXISTS players_level_idx ON players (level DESC)`);
+  await sql.execute(`CREATE INDEX IF NOT EXISTS players_fair_fight_idx ON players (fair_fight)`);
 
-  await sql`
+  await sql.execute(`
     CREATE TABLE IF NOT EXISTS hof_scan_cursor (
       category TEXT PRIMARY KEY,
-      next_offset INT NOT NULL DEFAULT 0,
-      last_scanned_at TIMESTAMPTZ,
-      total_known INT
+      next_offset INTEGER NOT NULL DEFAULT 0,
+      last_scanned_at TEXT,
+      total_known INTEGER
     )
-  `;
+  `);
 
   // Round-robin cursor for the 'user' -> 'search' background scan, one row
   // per level bucket (see LEVEL_SEARCH_BUCKETS) — the same pattern as
   // hof_scan_cursor, but paging through the whole playerbase in that band
   // instead of a single Hall of Fame category.
-  await sql`
+  await sql.execute(`
     CREATE TABLE IF NOT EXISTS user_search_cursor (
       bucket TEXT PRIMARY KEY,
-      min_level INT NOT NULL,
-      max_level INT NOT NULL,
-      next_offset INT NOT NULL DEFAULT 0,
-      last_scanned_at TIMESTAMPTZ,
-      total_known INT
+      min_level INTEGER NOT NULL,
+      max_level INTEGER NOT NULL,
+      next_offset INTEGER NOT NULL DEFAULT 0,
+      last_scanned_at TEXT,
+      total_known INTEGER
     )
-  `;
+  `);
 
   // Per-searcher "already shown" history, so repeat searches from the same
   // Torn account rotate through the pool instead of always converging on
   // the same handful of best-ranked players.
-  await sql`
+  await sql.execute(`
     CREATE TABLE IF NOT EXISTS shown_matches (
-      searcher_id BIGINT NOT NULL,
-      player_id BIGINT NOT NULL,
-      shown_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      searcher_id INTEGER NOT NULL,
+      player_id INTEGER NOT NULL,
+      shown_at TEXT NOT NULL DEFAULT (${NOW_UTC}),
       PRIMARY KEY (searcher_id, player_id)
     )
-  `;
-  await sql`CREATE INDEX IF NOT EXISTS shown_matches_searcher_idx ON shown_matches (searcher_id, shown_at)`;
+  `);
+  await sql.execute(`CREATE INDEX IF NOT EXISTS shown_matches_searcher_idx ON shown_matches (searcher_id, shown_at)`);
 }
 
 /** Idempotent; safe to call on every cold start (cached per warm instance). */
@@ -129,16 +133,19 @@ export async function upsertHofEntries(
   if (rows.length === 0) return;
 
   await mapWithConcurrency(rows, 10, async (r) => {
-    await sql`
-      INSERT INTO players (id, name, level, faction_id, hof_categories, hof_seen_at)
-      VALUES (${r.id}, ${r.name}, ${r.level}, ${r.faction_id}, ${sql.json(r.categories)}, now())
-      ON CONFLICT (id) DO UPDATE SET
-        name = EXCLUDED.name,
-        level = EXCLUDED.level,
-        faction_id = EXCLUDED.faction_id,
-        hof_categories = players.hof_categories || EXCLUDED.hof_categories,
-        hof_seen_at = now()
-    `;
+    await sql.execute({
+      sql: `
+        INSERT INTO players (id, name, level, faction_id, hof_categories, hof_seen_at)
+        VALUES (?, ?, ?, ?, ?, ${NOW_UTC})
+        ON CONFLICT (id) DO UPDATE SET
+          name = excluded.name,
+          level = excluded.level,
+          faction_id = excluded.faction_id,
+          hof_categories = json_patch(players.hof_categories, excluded.hof_categories),
+          hof_seen_at = ${NOW_UTC}
+      `,
+      args: [r.id, r.name, r.level, r.faction_id, JSON.stringify(r.categories)],
+    });
   });
 }
 
@@ -154,15 +161,18 @@ export async function upsertPlayerBasics(
 ): Promise<void> {
   if (entries.length === 0) return;
   await mapWithConcurrency(entries, 10, async (r) => {
-    await sql`
-      INSERT INTO players (id, name, level, faction_id, hof_categories, hof_seen_at)
-      VALUES (${r.id}, ${r.name}, ${r.level}, ${r.faction_id}, '{}'::jsonb, now())
-      ON CONFLICT (id) DO UPDATE SET
-        name = EXCLUDED.name,
-        level = EXCLUDED.level,
-        faction_id = EXCLUDED.faction_id,
-        hof_seen_at = now()
-    `;
+    await sql.execute({
+      sql: `
+        INSERT INTO players (id, name, level, faction_id, hof_categories, hof_seen_at)
+        VALUES (?, ?, ?, ?, '{}', ${NOW_UTC})
+        ON CONFLICT (id) DO UPDATE SET
+          name = excluded.name,
+          level = excluded.level,
+          faction_id = excluded.faction_id,
+          hof_seen_at = ${NOW_UTC}
+      `,
+      args: [r.id, r.name, r.level, r.faction_id],
+    });
   });
 }
 
@@ -173,11 +183,14 @@ export async function upsertStats(
 ): Promise<void> {
   if (stats.length === 0) return;
   await mapWithConcurrency(stats, 10, async (s) => {
-    await sql`
-      UPDATE players
-      SET fair_fight = ${s.fair_fight}, bs_estimate = ${s.bs_estimate}, bs_estimate_human = ${s.bs_estimate_human}, stats_updated_at = now()
-      WHERE id = ${s.id}
-    `;
+    await sql.execute({
+      sql: `
+        UPDATE players
+        SET fair_fight = ?, bs_estimate = ?, bs_estimate_human = ?, stats_updated_at = ${NOW_UTC}
+        WHERE id = ?
+      `,
+      args: [s.fair_fight, s.bs_estimate, s.bs_estimate_human, s.id],
+    });
   });
 }
 
@@ -187,14 +200,26 @@ export async function upsertStats(
  * minLevel with a known fair-fight estimate, best (level, fair fight) first.
  */
 export async function queryCandidatePool(sql: Sql, minLevel: number, limit: number): Promise<CachedPlayer[]> {
-  const rows = await sql<CachedPlayer[]>`
-    SELECT id, name, level, faction_id, hof_categories, fair_fight, bs_estimate, bs_estimate_human
-    FROM players
-    WHERE level >= ${minLevel} AND fair_fight IS NOT NULL
-    ORDER BY level DESC, fair_fight ASC
-    LIMIT ${limit}
-  `;
-  return rows;
+  const res = await sql.execute({
+    sql: `
+      SELECT id, name, level, faction_id, hof_categories, fair_fight, bs_estimate, bs_estimate_human
+      FROM players
+      WHERE level >= ? AND fair_fight IS NOT NULL
+      ORDER BY level DESC, fair_fight ASC
+      LIMIT ?
+    `,
+    args: [minLevel, limit],
+  });
+  return res.rows.map((row) => ({
+    id: Number(row.id),
+    name: String(row.name),
+    level: Number(row.level),
+    faction_id: row.faction_id != null ? Number(row.faction_id) : null,
+    hof_categories: JSON.parse(String(row.hof_categories)),
+    fair_fight: row.fair_fight != null ? Number(row.fair_fight) : null,
+    bs_estimate: row.bs_estimate != null ? Number(row.bs_estimate) : null,
+    bs_estimate_human: row.bs_estimate_human != null ? String(row.bs_estimate_human) : null,
+  }));
 }
 
 export interface ScanCursor {
@@ -202,27 +227,34 @@ export interface ScanCursor {
   next_offset: number;
 }
 
-/** Picks the category that's gone longest without a scan (round robin), creating cursor rows as needed. */
+/**
+ * Picks the category that's gone longest without a scan (round robin),
+ * creating cursor rows as needed. No WHERE-category filter is needed here —
+ * this table only ever holds rows for the exact category set callers pass
+ * in, since every row is created by the INSERT loop right above the query.
+ */
 export async function pickScanCategory(sql: Sql, categories: readonly string[]): Promise<ScanCursor> {
   await mapWithConcurrency([...categories], categories.length, async (c) => {
-    await sql`INSERT INTO hof_scan_cursor (category) VALUES (${c}) ON CONFLICT DO NOTHING`;
+    await sql.execute({
+      sql: `INSERT INTO hof_scan_cursor (category) VALUES (?) ON CONFLICT (category) DO NOTHING`,
+      args: [c],
+    });
   });
 
-  const [row] = await sql<ScanCursor[]>`
+  const res = await sql.execute(`
     SELECT category, next_offset FROM hof_scan_cursor
-    WHERE category = ANY(${sql.array(categories as string[])})
-    ORDER BY last_scanned_at ASC NULLS FIRST
+    ORDER BY last_scanned_at ASC
     LIMIT 1
-  `;
-  return row;
+  `);
+  const row = res.rows[0];
+  return { category: String(row.category), next_offset: Number(row.next_offset) };
 }
 
 export async function advanceScanCursor(sql: Sql, category: string, nextOffset: number, totalKnown: number): Promise<void> {
-  await sql`
-    UPDATE hof_scan_cursor
-    SET next_offset = ${nextOffset}, last_scanned_at = now(), total_known = ${totalKnown}
-    WHERE category = ${category}
-  `;
+  await sql.execute({
+    sql: `UPDATE hof_scan_cursor SET next_offset = ?, last_scanned_at = ${NOW_UTC}, total_known = ? WHERE category = ?`,
+    args: [nextOffset, totalKnown, category],
+  });
 }
 
 export interface SearchCursor {
@@ -238,38 +270,42 @@ export async function pickSearchBucket(
   buckets: { bucket: string; minLevel: number; maxLevel: number }[]
 ): Promise<SearchCursor> {
   await mapWithConcurrency(buckets, buckets.length, async (b) => {
-    await sql`
-      INSERT INTO user_search_cursor (bucket, min_level, max_level)
-      VALUES (${b.bucket}, ${b.minLevel}, ${b.maxLevel})
-      ON CONFLICT (bucket) DO NOTHING
-    `;
+    await sql.execute({
+      sql: `INSERT INTO user_search_cursor (bucket, min_level, max_level) VALUES (?, ?, ?) ON CONFLICT (bucket) DO NOTHING`,
+      args: [b.bucket, b.minLevel, b.maxLevel],
+    });
   });
 
-  const [row] = await sql<SearchCursor[]>`
+  const res = await sql.execute(`
     SELECT bucket, min_level, max_level, next_offset FROM user_search_cursor
-    WHERE bucket = ANY(${sql.array(buckets.map((b) => b.bucket))})
-    ORDER BY last_scanned_at ASC NULLS FIRST
+    ORDER BY last_scanned_at ASC
     LIMIT 1
-  `;
-  return row;
+  `);
+  const row = res.rows[0];
+  return {
+    bucket: String(row.bucket),
+    min_level: Number(row.min_level),
+    max_level: Number(row.max_level),
+    next_offset: Number(row.next_offset),
+  };
 }
 
 export async function advanceSearchCursor(sql: Sql, bucket: string, nextOffset: number, totalKnown: number | null): Promise<void> {
-  await sql`
-    UPDATE user_search_cursor
-    SET next_offset = ${nextOffset}, last_scanned_at = now(), total_known = ${totalKnown}
-    WHERE bucket = ${bucket}
-  `;
+  await sql.execute({
+    sql: `UPDATE user_search_cursor SET next_offset = ?, last_scanned_at = ${NOW_UTC}, total_known = ? WHERE bucket = ?`,
+    args: [nextOffset, totalKnown, bucket],
+  });
 }
 
 /** Every player this searcher has been shown before, newest-shown last. */
 export async function getShownHistory(sql: Sql, searcherId: number): Promise<Map<number, number>> {
-  const rows = await sql<{ player_id: number; shown_at: Date }[]>`
-    SELECT player_id, shown_at FROM shown_matches WHERE searcher_id = ${searcherId}
-  `;
+  const res = await sql.execute({
+    sql: `SELECT player_id, shown_at FROM shown_matches WHERE searcher_id = ?`,
+    args: [searcherId],
+  });
   const map = new Map<number, number>();
-  for (const row of rows) {
-    map.set(Number(row.player_id), new Date(row.shown_at).getTime());
+  for (const row of res.rows) {
+    map.set(Number(row.player_id), new Date(String(row.shown_at)).getTime());
   }
   return map;
 }
@@ -278,10 +314,13 @@ export async function getShownHistory(sql: Sql, searcherId: number): Promise<Map
 export async function recordShown(sql: Sql, searcherId: number, playerIds: number[]): Promise<void> {
   if (playerIds.length === 0) return;
   await mapWithConcurrency(playerIds, 10, async (id) => {
-    await sql`
-      INSERT INTO shown_matches (searcher_id, player_id, shown_at)
-      VALUES (${searcherId}, ${id}, now())
-      ON CONFLICT (searcher_id, player_id) DO UPDATE SET shown_at = now()
-    `;
+    await sql.execute({
+      sql: `
+        INSERT INTO shown_matches (searcher_id, player_id, shown_at)
+        VALUES (?, ?, ${NOW_UTC})
+        ON CONFLICT (searcher_id, player_id) DO UPDATE SET shown_at = ${NOW_UTC}
+      `,
+      args: [searcherId, id],
+    });
   });
 }

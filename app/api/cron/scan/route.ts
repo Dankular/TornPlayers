@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
 
   const sql = getSql();
   if (!sql) {
-    return NextResponse.json({ skipped: "No database configured (DATABASE_URL / POSTGRES_URL not set)." });
+    return NextResponse.json({ skipped: "No database configured (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN not set)." });
   }
 
   const scanKey = process.env.TORN_SCAN_KEY;

@@ -89,13 +89,18 @@ described above, live-only, no database required.
 ## Player cache (optional)
 
 Turning this on makes searches progressively more thorough over time — the
-cache only ever grows, so week two finds things week one couldn't.
+cache only ever grows, so week two finds things week one couldn't. Backed by
+[Turso](https://turso.tech) (hosted libSQL/SQLite) rather than Postgres —
+same idea, but Vercel's serverless functions have a read-only filesystem
+outside `/tmp` (and `/tmp` doesn't persist between invocations or across
+instances), so this can't be a literal local file; Turso is a real remote
+database that happens to speak SQLite.
 
-**1. Add a Postgres database.** In the Vercel dashboard: your project →
-**Storage** → **Create Database** → Postgres (the Neon integration). Connect
-it to this project — Vercel injects `POSTGRES_URL` (or `DATABASE_URL`)
-automatically, no copy-pasting a connection string required. Any other
-Postgres works too — just set `DATABASE_URL` yourself.
+**1. Add a Turso database.** [turso.tech](https://turso.tech) → create a
+database (free tier, no card required) → grab its `libsql://...` URL and
+generate an auth token. In the Vercel dashboard: your project → **Settings**
+→ **Environment Variables** → set `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN` to those two values.
 
 **2. Add a scanning key.** Set `TORN_SCAN_KEY` to a Torn API key with the
 same requirements as your own search key (see above — the
@@ -138,7 +143,7 @@ lib/
   torn.ts             # Torn API v2 client (hof, profile, battlestats, status)
   ffscouter.ts        # FFScouter client (batched fair-fight lookups)
   matching.ts         # candidate pool building + filtering + ranking
-  db.ts               # optional Postgres-backed player cache
+  db.ts               # optional Turso (libSQL)-backed player cache
   concurrency.ts       # small helper to bound in-flight requests
   types.ts            # shared types
 ```
