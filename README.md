@@ -1,0 +1,149 @@
+# TornPlayers
+
+Find easy, attackable targets in [Torn](https://www.torn.com) that "match" your
+account: enter your Torn API key and the app cross-references the public Torn
+**Hall of Fame** with [FFScouter](https://ffscouter.com)'s fair-fight
+estimates, then filters out anyone currently in hospital, jail, traveling, or
+abroad — leaving a short list of players you can actually attack right now.
+
+## How it works
+
+1. **Your profile** — `POST /v2/user?selections=profile,battlestats` gets your
+   level, faction, and (if your key allows it) battle stats.
+2. **Candidate pool** — two sources, combined:
+   - `GET /v2/torn/hof?cat=<category>` pages through the public Hall of Fame
+     (level, rank, attacks won, defends won, offences, awards, net worth,
+     etc.) — notable, record-holding players.
+   - `GET /v2/user/search?filters=level:>=:<minLevel>,notInHospital` pages
+     through the *entire* non-hospitalized playerbase at or above your level
+     floor — most "high level, low stats" accounts never placed in a Hall of
+     Fame category at all, so this is where most real matches come from.
+     Torn flags this selection `Unstable`; a failure here just falls back to
+     Hall-of-Fame-only, same as before it existed.
+3. **Fair-fight scoring** — all candidate IDs are sent to FFScouter's
+   `get-stats` endpoint (authenticated with the same Torn key) to get an
+   estimated fair-fight ratio against you. Only candidates inside your chosen
+   "easy" range are kept.
+4. **Live status check** — the best-scoring candidates get a fresh
+   `GET /v2/user/{id}?selections=profile` lookup; only players whose status is
+   `Okay` (not Hospital, Jail, Traveling, Abroad, Federal, ...) make the final
+   list. (`user/search` already excludes Hospital server-side, but it can't
+   also exclude Jail/Traveling in the same request, so this step still runs
+   for every candidate regardless of source.)
+5. **Shared cache (optional)** — if a database is connected, every search
+   also draws from a `players` table that accumulates Hall of Fame sightings
+   over time (from a background scanner and from prior searches), so later
+   searches reach far deeper into the Hall of Fame than any single request's
+   live pages cover. Anything sourced from the cache gets its fair-fight
+   number re-verified against FFScouter right before it's ever shown — the
+   cache only ever widens *which* players get considered, never what's
+   trusted about them. Status is always checked live regardless; it changes
+   by the minute, so it's never cached. See [Player cache](#player-cache-optional)
+   below.
+
+Your API key is only ever forwarded to the Torn and FFScouter APIs for the
+duration of a single search request — it is never stored, logged, or written
+to disk.
+
+### Requirements on your Torn key
+
+FFScouter's estimates are what make the matching work, and FFScouter only
+recognizes keys registered through its own signup form — so in practice you
+need a **Custom key**, not a plain Public/Limited one:
+
+1. Generate a Custom key with the [pre-filled selections this app + FFScouter
+   need](https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=TornPlayers&user=hof,faction,basic,profile,cooldowns,refills,attacks,battlestats,personalstats&faction=members,rankedwarreport,warfare,wars,rankedwars&torn=hof,rankedwarreport,rankedwars)
+   (includes `torn » hof` for the Hall of Fame pull, plus everything
+   FFScouter currently asks for).
+2. Submit that key on [ffscouter.com](https://ffscouter.com) (accept its
+   terms, paste the key in the signup form) — allow a few minutes for it to
+   start returning estimates.
+3. Use that same key here. Missing `torn:hof` or an unregistered FFScouter
+   key both produce a specific, actionable error message instead of a
+   generic failure.
+
+Battlestats permission on the key is otherwise optional — it's only used to
+show your own stats for context, not for the matching itself (FFScouter
+already computes fair fight from its own perspective on your key).
+
+## Development
+
+```bash
+npm install
+npm run dev
+```
+
+Then open http://localhost:3000.
+
+```bash
+npm run build   # production build + typecheck
+npm run lint    # eslint
+```
+
+## Deployment
+
+This is a standard Next.js (App Router) app — deploys as-is to Vercel or any
+Node host. With no environment variables set at all, it works exactly as
+described above, live-only, no database required.
+
+## Player cache (optional)
+
+Turning this on makes searches progressively more thorough over time — the
+cache only ever grows, so week two finds things week one couldn't. Backed by
+[Turso](https://turso.tech) (hosted libSQL/SQLite) rather than Postgres —
+same idea, but Vercel's serverless functions have a read-only filesystem
+outside `/tmp` (and `/tmp` doesn't persist between invocations or across
+instances), so this can't be a literal local file; Turso is a real remote
+database that happens to speak SQLite.
+
+**1. Add a Turso database.** [turso.tech](https://turso.tech) → create a
+database (free tier, no card required) → grab its `libsql://...` URL and
+generate an auth token. In the Vercel dashboard: your project → **Settings**
+→ **Environment Variables** → set `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN` to those two values.
+
+**2. Add a scanning key.** Set `TORN_SCAN_KEY` to a Torn API key with the
+same requirements as your own search key (see above — the
+[same pre-filled Custom-key link](https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=TornPlayers&user=hof,faction,basic,profile,cooldowns,refills,attacks,battlestats,personalstats&faction=members,rankedwarreport,warfare,wars,rankedwars&torn=hof,rankedwarreport,rankedwars),
+registered on ffscouter.com). This key only ever touches public Hall of Fame
+data and FFScouter lookups — it's used exclusively by the background
+scanner, never tied to a specific searcher.
+
+**3. (Recommended) Set `CRON_SECRET`** to any random string — Vercel sends it
+back as a bearer token on scheduled cron requests, so `/api/cron/scan` can
+verify a request actually came from your own cron schedule.
+
+Once those are set, `vercel.json` schedules `/api/cron/scan` once daily (the
+Vercel Hobby plan rejects any cron running more than once/day; Pro allows
+hourly and up — bump the schedule in `vercel.json` if you're on Pro). Each
+run advances a few Hall of Fame categories one page deeper (round-robin
+across all 14, wrapping around once a category's depth is exhausted) *and*
+a couple of `user/search` level buckets (round-robin across ten 10-level
+bands from 10 up to 100, same wrap-around behavior) — this second scan is
+what builds up the much larger non-Hall-of-Fame candidate pool over time.
+You can also trigger a scan manually any time: `GET /api/cron/scan` (with a
+`CRON_SECRET` set, pass `Authorization: Bearer <secret>`) — worth doing a
+few times by hand right after setup instead of waiting a full day between
+each step of the first scan.
+
+The cache is entirely additive to what's described above — nothing about the
+live scan, fair-fight scoring, or status check changes; the cache just
+supplies more candidates for that same pipeline to consider, and every
+cache-sourced candidate gets a fresh FFScouter check before it can appear in
+your results.
+
+## Project layout
+
+```
+app/
+  page.tsx                 # search form + results table
+  api/search/route.ts      # orchestrates the HOF -> FFScouter -> status pipeline
+  api/cron/scan/route.ts   # background scanner: advances the HOF cache
+lib/
+  torn.ts             # Torn API v2 client (hof, profile, battlestats, status)
+  ffscouter.ts        # FFScouter client (batched fair-fight lookups)
+  matching.ts         # candidate pool building + filtering + ranking
+  db.ts               # optional Turso (libSQL)-backed player cache
+  concurrency.ts       # small helper to bound in-flight requests
+  types.ts            # shared types
+```
