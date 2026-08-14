@@ -99,13 +99,15 @@ scanner, never tied to a specific searcher.
 back as a bearer token on scheduled cron requests, so `/api/cron/scan` can
 verify a request actually came from your own cron schedule.
 
-Once those are set, `vercel.json` schedules `/api/cron/scan` hourly, and each
-run advances a couple of Hall of Fame categories one page deeper (round-robin
-across all 14, wrapping around once a category's depth is exhausted). Note
-the Vercel Hobby plan restricts cron frequency (currently once/day) — Pro
-gets hourly-and-up; either way it still helps, just slower to build up.
-You can also trigger a scan manually any time: `GET /api/cron/scan` (with a
-`CRON_SECRET` set, pass `Authorization: Bearer <secret>`).
+Once those are set, `vercel.json` schedules `/api/cron/scan` once daily (the
+Vercel Hobby plan rejects any cron running more than once/day; Pro allows
+hourly and up — bump the schedule in `vercel.json` if you're on Pro). Each
+run advances a few Hall of Fame categories one page deeper (round-robin
+across all 14, wrapping around once a category's depth is exhausted). You
+can also trigger a scan manually any time: `GET /api/cron/scan` (with a
+`CRON_SECRET` set, pass `Authorization: Bearer <secret>`) — worth doing a
+few times by hand right after setup instead of waiting a full day between
+each step of the first scan.
 
 The cache is entirely additive to what's described above — nothing about the
 live scan, fair-fight scoring, or status check changes; the cache just
