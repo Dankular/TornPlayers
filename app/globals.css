@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+@theme {
+  --color-torn-bg: #0f1115;
+  --color-torn-panel: #171a21;
+  --color-torn-border: #262b36;
+  --color-torn-accent: #e2432a;
+  --color-torn-accent2: #3fa96b;
+}
+
+html {
+  color-scheme: dark;
+}
